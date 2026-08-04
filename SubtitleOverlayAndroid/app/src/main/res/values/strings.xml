@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Subtitle Overlay</string>
+    <string name="overlay_service_description">선택한 SRT 자막을 다른 앱 위에 표시합니다.</string>
+</resources>
+

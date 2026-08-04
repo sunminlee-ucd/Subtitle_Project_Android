@@ -1,0 +1,13 @@
+# Android Studio and local machine settings
+.idea/
+*.iml
+local.properties
+
+# Gradle and build outputs
+.gradle/
+**/build/
+captures/
+
+# OS files
+.DS_Store
+Thumbs.db
