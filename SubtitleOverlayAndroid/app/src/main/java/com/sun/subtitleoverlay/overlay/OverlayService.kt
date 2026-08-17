@@ -729,7 +729,6 @@ class OverlayService : Service() {
         if (selectedStudyCueIndices.isEmpty()) return
         selectedStudyCueIndices.clear()
         saveStudySelection()
-        stopStudyRepeat(pause = false, userInitiated = false)
         studyStoppedByUser = false
         updateSubtitleAppearance()
         updateStudyStatus()
