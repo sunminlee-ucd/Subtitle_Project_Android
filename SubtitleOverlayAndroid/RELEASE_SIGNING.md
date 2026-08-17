@@ -8,6 +8,7 @@ Run this on a trusted local machine and keep the generated file private:
 
 ```bash
 keytool -genkeypair -v \
+  -storetype JKS \
   -keystore subtitle-overlay-release.jks \
   -alias subtitle-overlay \
   -keyalg RSA \
@@ -15,7 +16,7 @@ keytool -genkeypair -v \
   -validity 10000
 ```
 
-Use strong passwords and back up the `.jks` file and its passwords in a secure password manager/offline backup. Do not commit the keystore or passwords to Git.
+The explicit `JKS` store type allows the keystore password and key password to be managed independently. Use strong passwords and back up the `.jks` file and its passwords in a secure password manager/offline backup. Do not commit the keystore or passwords to Git.
 
 ## 2. Convert the keystore to Base64
 
