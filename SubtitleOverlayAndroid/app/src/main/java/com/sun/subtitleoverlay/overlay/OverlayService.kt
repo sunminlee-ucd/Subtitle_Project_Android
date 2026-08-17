@@ -227,7 +227,7 @@ class OverlayService : Service() {
         playPauseView = chip("▶", widthDp = 42, textSizeSp = 17f, description = "Play or pause") { togglePlayback() }
         playbackControls.addView(playPauseView)
         playbackControls.addView(chip("+5", description = "Forward 5 seconds") { seekBy(5_000L) })
-        panel.addView(playbackControls)
+        panel.addView(collapsibleSection("Playback", playbackControls))
 
         val subtitleControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -242,7 +242,7 @@ class OverlayService : Service() {
         subtitleControls.addView(chip("A", textSizeSp = 18f, description = "Larger subtitles") {
             changeSubtitleTextSize(TEXT_SIZE_STEP_SP)
         })
-        panel.addView(subtitleControls)
+        panel.addView(collapsibleSection("Subtitle timing & size", subtitleControls))
 
         val positionControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -258,10 +258,57 @@ class OverlayService : Service() {
         positionControls.addView(chip("↺", textSizeSp = 17f, description = "Reset subtitle position") {
             resetSubtitlePosition()
         })
-        panel.addView(positionControls)
+        panel.addView(collapsibleSection("Subtitle position", positionControls))
 
         makeDraggable(panel)
         return panel
+    }
+
+    private fun collapsibleSection(
+        title: String,
+        content: View,
+        initiallyExpanded: Boolean = false,
+    ): LinearLayout {
+        var expanded = initiallyExpanded
+        val section = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+        }
+        val sectionHeader = TextView(this).apply {
+            textSize = 11f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER_VERTICAL
+            minHeight = dp(30)
+            setPadding(dp(9), dp(4), dp(9), dp(4))
+            background = roundedBackground(Color.argb(210, 42, 41, 48), dp(8), COLOR_BUTTON_BORDER)
+            isClickable = true
+            isFocusable = true
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                topMargin = dp(4)
+            }
+        }
+
+        fun renderState() {
+            sectionHeader.text = if (expanded) "▾ $title" else "▸ $title"
+            sectionHeader.contentDescription = if (expanded) "Collapse $title controls" else "Expand $title controls"
+            content.visibility = if (expanded) View.VISIBLE else View.GONE
+        }
+
+        sectionHeader.setOnClickListener {
+            expanded = !expanded
+            renderState()
+            section.requestLayout()
+            controllerView?.requestLayout()
+        }
+
+        renderState()
+        section.addView(sectionHeader)
+        section.addView(content)
+        return section
     }
 
     private fun chip(
