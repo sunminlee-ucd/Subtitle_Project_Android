@@ -17,9 +17,13 @@
 - Netflix/YouTube가 공개하는 MediaSession 재생 위치 자동 감지
 - 자동 위치를 제공하지 않는 기기를 위한 수동 타이머 fallback
 - Playback / Subtitle timing & size / Subtitle position / Study mode 기능별 접기·펼치기 컨트롤
-- Study mode ON/OFF 상태 저장
-- Study mode에서 이전 자막 / 현재 자막 다시 듣기 / 다음 자막 이동
-- Study mode에서 MediaSession 제어가 가능한 영상은 현재 자막이 끝날 때 자동 일시정지
+- Watch mode / Study mode 전환 상태 저장
+- Study mode에서 현재 표시 중인 자막을 직접 눌러 학습 목록에 저장/해제
+- 저장된 자막은 SRT fingerprint별로 복원하며 최근 20개 SRT의 선택 목록 유지
+- 자막별 반복 횟수 1~20회 설정, 기본값 5회
+- 현재 자막 반복 재생 및 저장한 자막들을 시간순으로 반복 재생
+- 저장한 Study playlist의 마지막 자막까지 끝나면 영상 일시정지
+- Watch mode로 돌아갈 때 반복만 종료하고 일반 영상 재생은 계속 유지
 - 영상 시청 중 컨트롤 완전 숨김, 알림의 **Controls**로 복원
 - 최근 선택한 SRT 자동 재사용
 - 자막 텍스트 폭에 맞춘 반투명 배경
@@ -42,14 +46,14 @@ Android Studio에서 이 폴더를 열고 SDK 36을 설치한 뒤 Gradle Sync를
 1. Android Studio에서 `SubtitleOverlayAndroid` 폴더를 엽니다.
 2. 실제 Android 기기를 연결하고 `app`을 실행합니다.
 3. **다른 앱 위에 표시 권한 허용**을 누르고 앱 권한을 켭니다.
-4. 자동 싱크를 사용하려면 **Enable automatic playback sync**를 누르고
+4. 자동 싱크와 Study 반복 재생을 사용하려면 **Enable automatic playback sync**를 누르고
    `Subtitle Overlay`의 알림 접근 권한을 켭니다.
 5. 번역된 SRT 파일을 선택합니다. 선택한 파일은 다음 실행부터 자동으로 다시 불러옵니다.
 6. **Start subtitle overlay**를 누른 뒤 Netflix 또는 YouTube를 엽니다.
 7. 플레이어가 재생 위치를 공개하면 컨트롤에 `AUTO · N`, `AUTO · Y` 또는 `AUTO`가
    표시됩니다. `MANUAL`이면 영상 시작 시점에 맞춰 재생 버튼을 누릅니다.
 
-영상 없이 기능만 확인하려면 `sample_subtitles.srt`를 휴대폰으로 복사해 선택하세요.
+영상 없이 기본 자막 표시 기능만 확인하려면 `sample_subtitles.srt`를 휴대폰으로 복사해 선택하세요.
 재생 버튼을 누르면 1초 후부터 테스트 자막이 순서대로 표시됩니다.
 
 `Δ`는 자막 싱크 오프셋입니다. `+0.5`는 자막 타이밍을 0.5초 늦추고, `-0.5`는
@@ -62,9 +66,31 @@ Playback의 속도 버튼을 누르면 지원 속도를 순환합니다. 영상 
 통해 속도 변경을 공개하면 실제 영상 속도를 변경하고, 수동 모드에서는 자막 타이머 속도를
 변경합니다. 영상 앱이 외부 속도 제어를 허용하지 않으면 안내 메시지를 표시합니다.
 
-Study mode를 켜면 설정이 저장됩니다. `◀`는 이전 자막으로 이동하고, `↺`는 현재 자막의
-처음으로 돌아가 다시 재생하며, `▶`는 다음 자막으로 이동합니다. 자동 재생 제어가 가능한
-영상 앱에서는 자막 한 줄이 끝날 때 영상을 자동으로 일시정지합니다.
+## Study mode
+
+웹 `Subtitle_Project/chrome_extension`의 Study mode 동작을 Android에 맞게 포팅했습니다.
+
+1. Study mode 섹션에서 **Study**를 누릅니다.
+2. 영상 위에 번역 자막이 표시될 때 자막 자체를 누르면 해당 cue가 학습 목록에 저장됩니다.
+   다시 누르면 해제됩니다. Study mode에서 저장된 자막은 녹색 테두리/배경으로 구분됩니다.
+3. `−`, `+`로 각 자막의 반복 횟수를 1~20회 사이에서 조절합니다. 기본값은 5회입니다.
+4. **Repeat current**는 현재 표시 중인 자막 구간을 설정한 횟수만큼 반복한 뒤 일반 재생을
+   계속합니다.
+5. **Play saved**는 저장한 자막들을 원래 타임라인 순서로 정렬해 각각 설정한 횟수만큼
+   반복합니다. 마지막 저장 자막이 끝나면 영상이 일시정지됩니다.
+6. **Stop**은 반복을 즉시 중단하고 영상을 일시정지합니다.
+7. **Clear**는 현재 SRT의 저장된 Study cue 목록을 비웁니다.
+8. **Watch**로 돌아가면 진행 중인 Study 반복은 끝나지만 영상을 강제로 일시정지하지는 않습니다.
+
+선택 목록은 `파일명 + SRT 내용`의 SHA-256 fingerprint를 기준으로 저장됩니다. 같은 SRT를
+다시 열면 이전에 저장한 cue가 복원됩니다. 저장 공간 증가를 막기 위해 최근 20개 SRT의
+선택 목록만 유지합니다.
+
+웹 버전은 브라우저 `<video>`를 직접 제어하지만 Android는 다른 앱의 비디오 객체에 직접
+접근할 수 없습니다. 따라서 Android에서 실제 영상 구간 반복은 대상 앱이 MediaSession을
+통해 seek 제어를 제공할 때만 정확하게 동작합니다. 해당 제어를 제공하지 않는 앱에서는
+Study cue 저장/복원은 사용할 수 있지만 반복 재생 버튼을 누르면 지원되지 않는다는 안내가
+표시됩니다.
 
 **Hide**는 컨트롤을 완전히 숨깁니다. Android 알림창의 Subtitle Overlay 알림에서
 **Controls**를 누르면 다시 표시됩니다.
@@ -98,7 +124,7 @@ release keystore 파일과 비밀번호는 저장소에 커밋하지 마세요. 
 
 - 자동 싱크는 영상 앱이 Android MediaSession에 유효한 재생 위치를 공개할 때만 동작합니다.
   공개하지 않는 앱이나 기기에서는 수동 타이머를 사용합니다.
-- 실제 영상 재생 속도 변경과 Study mode 자동 일시정지는 영상 앱이 MediaSession에서 해당
+- 실제 영상 재생 속도 변경과 Study mode 반복 재생은 영상 앱이 MediaSession에서 해당
   제어를 허용하는 경우에만 동작합니다.
 - Android 보안 정책상 저장소의 모든 SRT를 무단 검색하지 않습니다. 사용자가 시스템 파일
   선택기에서 한 번 선택한 SRT만 기억하고 다시 사용합니다.
