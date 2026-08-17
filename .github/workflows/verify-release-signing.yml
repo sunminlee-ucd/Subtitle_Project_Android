@@ -40,6 +40,7 @@ jobs:
           set -euo pipefail
           KEYSTORE_PATH="$RUNNER_TEMP/ci-release.jks"
           keytool -genkeypair -noprompt \
+            -storetype JKS \
             -keystore "$KEYSTORE_PATH" \
             -storepass "ci-store-password" \
             -keypass "ci-key-password" \
