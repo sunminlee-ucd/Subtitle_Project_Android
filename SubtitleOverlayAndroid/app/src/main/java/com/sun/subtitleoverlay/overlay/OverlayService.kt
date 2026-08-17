@@ -38,6 +38,7 @@ import com.sun.subtitleoverlay.RestoreControlsActivity
 import com.sun.subtitleoverlay.playback.PlaybackNotificationListener
 import com.sun.subtitleoverlay.study.StudyPlaybackCommand
 import com.sun.subtitleoverlay.study.StudyPlaybackEngine
+import com.sun.subtitleoverlay.study.StudySavedCuesActivity
 import com.sun.subtitleoverlay.subtitle.SrtParser
 import com.sun.subtitleoverlay.subtitle.SubtitleCue
 import java.security.MessageDigest
@@ -350,6 +351,9 @@ class OverlayService : Service() {
         })
         actionRow.addView(chip("Play saved", widthDp = 70, textSizeSp = 9f, description = "Play saved study subtitles") {
             playSelectedStudyCues()
+        })
+        actionRow.addView(chip("Saved list", widthDp = 60, textSizeSp = 9f, description = "Search saved study subtitles") {
+            openStudySavedCues()
         })
         actionRow.addView(chip("Stop", widthDp = 44, textSizeSp = 9f, description = "Stop study repetition") {
             stopStudyRepeat(pause = true, userInitiated = true)
@@ -779,6 +783,13 @@ class OverlayService : Service() {
         studyStoppedByUser = false
         executeStudyPlaybackCommand(command)
         updateStudyStatus()
+    }
+
+    private fun openStudySavedCues() {
+        startActivity(
+            Intent(this, StudySavedCuesActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
     }
 
     private fun hasControllableStudyPlayback(): Boolean {
