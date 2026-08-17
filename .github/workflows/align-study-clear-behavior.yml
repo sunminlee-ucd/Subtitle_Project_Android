@@ -23,30 +23,24 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+
           path = Path('SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/overlay/OverlayService.kt')
-          text = path.read_text()
-          old = '''    private fun clearStudySelection() {
-              if (selectedStudyCueIndices.isEmpty()) return
-              selectedStudyCueIndices.clear()
-              saveStudySelection()
-              stopStudyRepeat(pause = false, userInitiated = false)
-              studyStoppedByUser = false
-              updateSubtitleAppearance()
-              updateStudyStatus()
-          }
-          '''
-          new = '''    private fun clearStudySelection() {
-              if (selectedStudyCueIndices.isEmpty()) return
-              selectedStudyCueIndices.clear()
-              saveStudySelection()
-              studyStoppedByUser = false
-              updateSubtitleAppearance()
-              updateStudyStatus()
-          }
-          '''
-          if old not in text:
-              raise SystemExit('Expected clearStudySelection block was not found')
-          path.write_text(text.replace(old, new, 1))
+          lines = path.read_text().splitlines(keepends=True)
+          function_index = next(
+              (index for index, line in enumerate(lines) if 'private fun clearStudySelection()' in line),
+              None,
+          )
+          if function_index is None:
+              raise SystemExit('clearStudySelection function was not found')
+
+          target = 'stopStudyRepeat(pause = false, userInitiated = false)'
+          for index in range(function_index, min(function_index + 12, len(lines))):
+              if target in lines[index]:
+                  del lines[index]
+                  path.write_text(''.join(lines))
+                  break
+          else:
+              raise SystemExit('Expected stopStudyRepeat line was not found inside clearStudySelection')
           PY
 
       - name: Commit patch
