@@ -1,0 +1,61 @@
+name: Align Study clear-selection behavior
+
+on:
+  push:
+    branches:
+      - agent/port-web-study-mode
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: agent/port-web-study-mode
+
+      - name: Match web Clear selection behavior
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/overlay/OverlayService.kt')
+          text = path.read_text()
+          old = '''    private fun clearStudySelection() {
+              if (selectedStudyCueIndices.isEmpty()) return
+              selectedStudyCueIndices.clear()
+              saveStudySelection()
+              stopStudyRepeat(pause = false, userInitiated = false)
+              studyStoppedByUser = false
+              updateSubtitleAppearance()
+              updateStudyStatus()
+          }
+          '''
+          new = '''    private fun clearStudySelection() {
+              if (selectedStudyCueIndices.isEmpty()) return
+              selectedStudyCueIndices.clear()
+              saveStudySelection()
+              studyStoppedByUser = false
+              updateSubtitleAppearance()
+              updateStudyStatus()
+          }
+          '''
+          if old not in text:
+              raise SystemExit('Expected clearStudySelection block was not found')
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/overlay/OverlayService.kt
+          git diff --cached --quiet && exit 0
+          git commit -m "Match web Study clear-selection behavior"
+          git push origin HEAD:agent/port-web-study-mode
