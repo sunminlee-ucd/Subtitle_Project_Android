@@ -15,7 +15,7 @@
 - `Pos ↓` / `Pos ↑` 위치 조절, `Reset` 기본 위치 복원
 - Netflix/YouTube가 공개하는 MediaSession 재생 위치 자동 감지
 - 자동 위치를 제공하지 않는 기기를 위한 수동 타이머 fallback
-- 작고 깔끔한 3단 플로팅 컨트롤러와 드래그 이동
+- Playback / Subtitle timing & size / Subtitle position 기능별 접기·펼치기 컨트롤
 - 영상 시청 중 컨트롤 완전 숨김, 알림의 **Controls**로 복원
 - 최근 선택한 SRT 자동 재사용
 - 자막 텍스트 폭에 맞춘 반투명 배경
@@ -27,10 +27,10 @@
 - Android Gradle Plugin 9.3.0
 - Gradle Wrapper 9.5.0
 - JDK 17
-- compileSdk / targetSdk 37
+- compileSdk / targetSdk 36
 - minSdk 26 (Android 8.0)
 
-Android Studio에서 이 폴더를 열고 SDK 37을 설치한 뒤 Gradle Sync를 실행하세요.
+Android Studio에서 이 폴더를 열고 SDK 36을 설치한 뒤 Gradle Sync를 실행하세요.
 프로젝트에 포함된 Gradle Wrapper가 빌드에 필요한 Gradle 9.5.0을 자동으로 사용합니다.
 
 ## 실행 방법
@@ -51,6 +51,9 @@ Android Studio에서 이 폴더를 열고 SDK 37을 설치한 뒤 Gradle Sync를
 `Δ`는 자막 싱크 오프셋입니다. `+0.5`는 자막 타이밍을 0.5초 늦추고, `-0.5`는
 0.5초 앞당깁니다.
 
+상단의 Playback / Subtitle timing & size / Subtitle position 헤더를 누르면 각 기능의
+컨트롤을 독립적으로 접거나 펼칠 수 있습니다.
+
 **Hide**는 컨트롤을 완전히 숨깁니다. Android 알림창의 Subtitle Overlay 알림에서
 **Controls**를 누르면 다시 표시됩니다.
 
@@ -60,6 +63,24 @@ Android Studio에서 이 폴더를 열고 SDK 37을 설치한 뒤 Gradle Sync를
 `↓`는 자막을 화면 아래쪽으로, `↑`는 위쪽으로 12dp씩 이동합니다. `↺`는
 Netflix 기본 자막 영역에 가까운 하단 24dp 위치로 되돌립니다. 마지막 위치는 자동으로
 저장됩니다.
+
+## 고객 배포용 APK
+
+고객에게는 일반 debug APK가 아니라 `.github/workflows/build-signed-release.yml`에서 생성한
+**signed release APK만 배포**하세요. 이 워크플로는 고정된 release signing key를 GitHub
+Actions Secrets에서 읽어 사용하고, 매 실행마다 `versionCode`를 증가시켜 기존 고객이 앱을
+삭제하지 않고 업데이트할 수 있도록 구성되어 있습니다.
+
+최초 배포 전에 저장소에 다음 GitHub Actions Secrets를 한 번 설정해야 합니다.
+
+- `ANDROID_KEYSTORE_BASE64`
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+
+release keystore 파일과 비밀번호는 저장소에 커밋하지 마세요. 같은 앱의 업데이트를 계속
+배포하려면 최초 고객 배포에 사용한 signing key를 계속 보관하고 사용해야 합니다.
+자세한 절차는 `RELEASE_SIGNING.md`를 참고하세요.
 
 ## 알려진 제약
 
