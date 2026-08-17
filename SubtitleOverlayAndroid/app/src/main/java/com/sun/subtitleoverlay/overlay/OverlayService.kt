@@ -20,6 +20,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -35,21 +36,34 @@ import androidx.core.net.toUri
 import com.sun.subtitleoverlay.MainActivity
 import com.sun.subtitleoverlay.RestoreControlsActivity
 import com.sun.subtitleoverlay.playback.PlaybackNotificationListener
+import com.sun.subtitleoverlay.study.StudyPlaybackCommand
+import com.sun.subtitleoverlay.study.StudyPlaybackEngine
 import com.sun.subtitleoverlay.subtitle.SrtParser
 import com.sun.subtitleoverlay.subtitle.SubtitleCue
+import java.security.MessageDigest
 
 @SuppressLint("SetTextI18n")
 class OverlayService : Service() {
     private lateinit var windowManager: WindowManager
     private lateinit var mediaSessionManager: MediaSessionManager
+
     private var subtitleView: TextView? = null
     private var controllerView: View? = null
     private var positionView: TextView? = null
     private var statusView: TextView? = null
     private var playPauseView: TextView? = null
     private var speedView: TextView? = null
+    private var watchModeView: TextView? = null
     private var studyModeView: TextView? = null
+    private var studyRepeatView: TextView? = null
+    private var studyStatusView: TextView? = null
+
     private var cues: List<SubtitleCue> = emptyList()
+    private var subtitleListId = ""
+    private var renderedCueIndices: List<Int> = emptyList()
+    private val selectedStudyCueIndices = linkedSetOf<Int>()
+    private var studyPlaybackEngine: StudyPlaybackEngine? = null
+
     private val handler = Handler(Looper.getMainLooper())
 
     private var isPlaying = false
@@ -58,10 +72,10 @@ class OverlayService : Service() {
     private var offsetMs = 0L
     private var manualPlaybackSpeed = DEFAULT_PLAYBACK_SPEED
     private var studyModeEnabled = false
-    private var studyAutoPausedCueIndex = -1
+    private var studyRepeatCount = StudyPlaybackEngine.DEFAULT_REPEAT_COUNT
+    private var studyStoppedByUser = false
     private var subtitleTextSizeSp = DEFAULT_SUBTITLE_TEXT_SIZE_SP
     private var subtitleBottomMarginDp = DEFAULT_SUBTITLE_BOTTOM_MARGIN_DP
-    private var lastCueIndex = -1
     private var lastSessionRefreshMs = 0L
 
     private var activeController: MediaController? = null
@@ -71,6 +85,7 @@ class OverlayService : Service() {
         }
 
         override fun onSessionDestroyed() {
+            stopStudyRepeat(pause = false, userInitiated = false)
             detachController(preservePosition = true)
             refreshActiveController()
         }
@@ -95,12 +110,17 @@ class OverlayService : Service() {
         super.onCreate()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         mediaSessionManager = getSystemService(MEDIA_SESSION_SERVICE) as MediaSessionManager
+
         val preferences = getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE)
         subtitleTextSizeSp = preferences.getFloat(KEY_SUBTITLE_TEXT_SIZE, DEFAULT_SUBTITLE_TEXT_SIZE_SP)
         subtitleBottomMarginDp = preferences.getInt(KEY_SUBTITLE_BOTTOM_MARGIN, DEFAULT_SUBTITLE_BOTTOM_MARGIN_DP)
         manualPlaybackSpeed = preferences.getFloat(KEY_PLAYBACK_SPEED, DEFAULT_PLAYBACK_SPEED)
             .coerceIn(PLAYBACK_SPEEDS.first(), PLAYBACK_SPEEDS.last())
         studyModeEnabled = preferences.getBoolean(KEY_STUDY_MODE, false)
+        studyRepeatCount = preferences.getInt(
+            KEY_STUDY_REPEAT_COUNT,
+            StudyPlaybackEngine.DEFAULT_REPEAT_COUNT,
+        ).coerceIn(StudyPlaybackEngine.MIN_REPEAT_COUNT, StudyPlaybackEngine.MAX_REPEAT_COUNT)
         createNotificationChannel()
     }
 
@@ -139,8 +159,15 @@ class OverlayService : Service() {
         return runCatching {
             val text = contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
                 ?: error("The SRT file cannot be opened.")
-            cues = SrtParser.parse(text)
-            require(cues.isNotEmpty()) { "No valid subtitle cues were found." }
+            val parsedCues = SrtParser.parse(text)
+            require(parsedCues.isNotEmpty()) { "No valid subtitle cues were found." }
+
+            stopStudyRepeat(pause = false, userInitiated = false)
+            cues = parsedCues
+            subtitleListId = subtitleFingerprint(queryDisplayName(uri), text)
+            studyPlaybackEngine = StudyPlaybackEngine(cues)
+            restoreStudySelection()
+
             showWindows()
             resetPlayback()
             stopSessionMonitoring()
@@ -155,6 +182,7 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
+        stopStudyRepeat(pause = false, userInitiated = false)
         stopSessionMonitoring()
         subtitleView?.let(::removeWindowSafely)
         controllerView?.let(::removeWindowSafely)
@@ -175,6 +203,8 @@ class OverlayService : Service() {
         controllerView = createController().also {
             windowManager.addView(it, controllerLayoutParams())
         }
+        updateStudyModeUi()
+        updateSubtitleTouchability()
         handler.removeCallbacks(ticker)
         handler.post(ticker)
     }
@@ -187,8 +217,9 @@ class OverlayService : Service() {
         gravity = Gravity.CENTER
         maxWidth = resources.displayMetrics.widthPixels - dp(32)
         setPadding(dp(14), dp(7), dp(14), dp(7))
-        background = roundedBackground(Color.argb(175, 8, 8, 10), dp(8))
+        background = normalSubtitleBackground()
         visibility = View.INVISIBLE
+        setOnClickListener { toggleRenderedStudyCues() }
     }
 
     private fun createController(): View {
@@ -249,8 +280,14 @@ class OverlayService : Service() {
             gravity = Gravity.CENTER
             setPadding(0, dp(5), 0, 0)
         }
-        subtitleControls.addView(chip("−.5", description = "Show subtitles 0.5 seconds earlier") { offsetMs -= 500L })
-        subtitleControls.addView(chip("+.5", description = "Show subtitles 0.5 seconds later") { offsetMs += 500L })
+        subtitleControls.addView(chip("−.5", description = "Show subtitles 0.5 seconds earlier") {
+            offsetMs -= 500L
+            updateOverlay()
+        })
+        subtitleControls.addView(chip("+.5", description = "Show subtitles 0.5 seconds later") {
+            offsetMs += 500L
+            updateOverlay()
+        })
         subtitleControls.addView(chip("a", textSizeSp = 12f, description = "Smaller subtitles") {
             changeSubtitleTextSize(-TEXT_SIZE_STEP_SP)
         })
@@ -276,20 +313,59 @@ class OverlayService : Service() {
         panel.addView(collapsibleSection("Subtitle position", positionControls))
 
         val studyControls = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+            orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(0, dp(5), 0, 0)
         }
-        studyModeView = chip(
-            if (studyModeEnabled) "Study ON" else "Study OFF",
-            widthDp = 72,
-            textSizeSp = 10f,
-            description = "Toggle study mode",
-        ) { toggleStudyMode() }
-        studyControls.addView(studyModeView)
-        studyControls.addView(chip("◀", textSizeSp = 16f, description = "Previous subtitle") { previousStudyCue() })
-        studyControls.addView(chip("↺", textSizeSp = 17f, description = "Replay current subtitle") { replayStudyCue() })
-        studyControls.addView(chip("▶", textSizeSp = 16f, description = "Next subtitle") { nextStudyCue() })
+
+        val modeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        watchModeView = chip("Watch", widthDp = 58, textSizeSp = 10f, description = "Switch to Watch mode") {
+            setStudyMode(false)
+        }
+        studyModeView = chip("Study", widthDp = 58, textSizeSp = 10f, description = "Switch to Study mode") {
+            setStudyMode(true)
+        }
+        modeRow.addView(watchModeView)
+        modeRow.addView(studyModeView)
+        modeRow.addView(chip("−", widthDp = 30, textSizeSp = 16f, description = "Decrease study repeat count") {
+            changeStudyRepeatCount(-1)
+        })
+        studyRepeatView = infoChip("${studyRepeatCount}×", widthDp = 42)
+        modeRow.addView(studyRepeatView)
+        modeRow.addView(chip("+", widthDp = 30, textSizeSp = 16f, description = "Increase study repeat count") {
+            changeStudyRepeatCount(1)
+        })
+        studyControls.addView(modeRow)
+
+        val actionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, dp(4), 0, 0)
+        }
+        actionRow.addView(chip("Repeat current", widthDp = 80, textSizeSp = 9f, description = "Repeat the current subtitle") {
+            repeatCurrentStudyCue()
+        })
+        actionRow.addView(chip("Play saved", widthDp = 70, textSizeSp = 9f, description = "Play saved study subtitles") {
+            playSelectedStudyCues()
+        })
+        actionRow.addView(chip("Stop", widthDp = 44, textSizeSp = 9f, description = "Stop study repetition") {
+            stopStudyRepeat(pause = true, userInitiated = true)
+        })
+        actionRow.addView(chip("Clear", widthDp = 44, textSizeSp = 9f, description = "Clear saved study subtitles") {
+            clearStudySelection()
+        })
+        studyControls.addView(actionRow)
+
+        studyStatusView = TextView(this).apply {
+            textSize = 10f
+            setTextColor(COLOR_MUTED_TEXT)
+            gravity = Gravity.CENTER
+            setPadding(dp(5), dp(5), dp(5), 0)
+        }
+        studyControls.addView(studyStatusView)
         panel.addView(collapsibleSection("Study mode", studyControls))
 
         makeDraggable(panel)
@@ -363,6 +439,26 @@ class OverlayService : Service() {
         isClickable = true
         isFocusable = true
         setOnClickListener { action() }
+        val margin = dp(1)
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply {
+            marginStart = margin
+            marginEnd = margin
+        }
+    }
+
+    private fun infoChip(label: String, widthDp: Int) = TextView(this).apply {
+        text = label
+        textSize = 10f
+        typeface = Typeface.DEFAULT_BOLD
+        gravity = Gravity.CENTER
+        setTextColor(Color.WHITE)
+        minWidth = dp(widthDp)
+        minHeight = dp(32)
+        setPadding(dp(6), 0, dp(6), 0)
+        background = roundedBackground(Color.argb(255, 52, 51, 59), dp(9), COLOR_BUTTON_BORDER)
         val margin = dp(1)
         layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -471,7 +567,7 @@ class OverlayService : Service() {
         WindowManager.LayoutParams.WRAP_CONTENT,
         WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+            (if (studyModeEnabled) 0 else WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
         PixelFormat.TRANSLUCENT,
     ).apply {
@@ -496,8 +592,9 @@ class OverlayService : Service() {
         basePositionMs = 0L
         startedAtElapsedMs = SystemClock.elapsedRealtime()
         offsetMs = 0L
-        lastCueIndex = -1
-        studyAutoPausedCueIndex = -1
+        renderedCueIndices = emptyList()
+        studyPlaybackEngine?.stop()
+        studyStoppedByUser = false
         updateOverlay()
     }
 
@@ -528,15 +625,13 @@ class OverlayService : Service() {
         val mediaPosition = mediaPositionMs()
         val state = usablePlaybackState()
         if (mediaPosition != null && state != null && state.actions and PlaybackState.ACTION_SEEK_TO != 0L) {
-            studyAutoPausedCueIndex = -1
             activeController?.transportControls?.seekTo((mediaPosition + deltaMs).coerceAtLeast(0L))
             return
         }
 
         basePositionMs = (manualPositionMs() + deltaMs).coerceAtLeast(0L)
         startedAtElapsedMs = SystemClock.elapsedRealtime()
-        lastCueIndex = -1
-        studyAutoPausedCueIndex = -1
+        renderedCueIndices = emptyList()
         updateOverlay()
     }
 
@@ -589,123 +684,283 @@ class OverlayService : Service() {
         }
     }
 
-    private fun toggleStudyMode() {
-        studyModeEnabled = !studyModeEnabled
-        studyAutoPausedCueIndex = -1
+    private fun setStudyMode(enabled: Boolean) {
+        if (studyModeEnabled == enabled) return
+        if (!enabled) {
+            stopStudyRepeat(pause = false, userInitiated = false)
+        }
+        studyModeEnabled = enabled
         getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE).edit {
             putBoolean(KEY_STUDY_MODE, studyModeEnabled)
         }
-        studyModeView?.text = if (studyModeEnabled) "Study ON" else "Study OFF"
-        if (studyModeEnabled && usablePlaybackState() == null) {
-            Toast.makeText(
-                this,
-                "Study mode is on. Automatic video pause requires a controllable MediaSession; subtitle navigation still works.",
-                Toast.LENGTH_LONG,
-            ).show()
+        updateStudyModeUi()
+        updateSubtitleTouchability()
+        updateSubtitleAppearance()
+    }
+
+    private fun changeStudyRepeatCount(delta: Int) {
+        studyRepeatCount = (studyRepeatCount + delta).coerceIn(
+            StudyPlaybackEngine.MIN_REPEAT_COUNT,
+            StudyPlaybackEngine.MAX_REPEAT_COUNT,
+        )
+        getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE).edit {
+            putInt(KEY_STUDY_REPEAT_COUNT, studyRepeatCount)
         }
+        studyRepeatView?.text = "${studyRepeatCount}×"
+        studyStoppedByUser = false
+        updateStudyStatus()
     }
 
-    private fun previousStudyCue() {
-        if (cues.isEmpty()) return
-        val subtitlePosition = currentPositionMs() - offsetMs
-        val active = findCueIndex(subtitlePosition)
-        val target = if (active >= 0) {
-            (active - 1).coerceAtLeast(0)
-        } else {
-            cueIndexAtOrBefore(subtitlePosition).coerceAtLeast(0)
+    private fun toggleRenderedStudyCues() {
+        if (!studyModeEnabled || renderedCueIndices.isEmpty() || subtitleListId.isBlank()) return
+
+        val shouldRemove = renderedCueIndices.all(selectedStudyCueIndices::contains)
+        for (index in renderedCueIndices) {
+            if (shouldRemove) selectedStudyCueIndices.remove(index)
+            else selectedStudyCueIndices.add(index)
         }
-        seekToStudyCue(target, playAfterSeek = false)
+        saveStudySelection()
+        studyStoppedByUser = false
+        updateSubtitleAppearance()
+        updateStudyStatus()
     }
 
-    private fun replayStudyCue() {
-        if (cues.isEmpty()) return
-        val subtitlePosition = currentPositionMs() - offsetMs
-        val active = findCueIndex(subtitlePosition)
-        val target = if (active >= 0) active else cueIndexAtOrBefore(subtitlePosition).coerceAtLeast(0)
-        seekToStudyCue(target, playAfterSeek = true)
+    private fun clearStudySelection() {
+        if (selectedStudyCueIndices.isEmpty()) return
+        selectedStudyCueIndices.clear()
+        saveStudySelection()
+        studyStoppedByUser = false
+        updateSubtitleAppearance()
+        updateStudyStatus()
     }
 
-    private fun nextStudyCue() {
-        if (cues.isEmpty()) return
-        val subtitlePosition = currentPositionMs() - offsetMs
-        val active = findCueIndex(subtitlePosition)
-        val target = if (active >= 0) {
-            (active + 1).coerceAtMost(cues.lastIndex)
-        } else {
-            cueIndexAtOrAfter(subtitlePosition).coerceIn(0, cues.lastIndex)
-        }
-        seekToStudyCue(target, playAfterSeek = false)
-    }
-
-    private fun seekToStudyCue(index: Int, playAfterSeek: Boolean) {
-        if (index !in cues.indices) return
-        val targetPosition = (cues[index].startMs + offsetMs).coerceAtLeast(0L)
-        studyAutoPausedCueIndex = -1
-        lastCueIndex = -1
-
-        val state = usablePlaybackState()
-        if (state != null && state.actions and PlaybackState.ACTION_SEEK_TO != 0L) {
-            runCatching {
-                activeController?.transportControls?.seekTo(targetPosition)
-                if (playAfterSeek) activeController?.transportControls?.play()
-                else activeController?.transportControls?.pause()
-            }
+    private fun repeatCurrentStudyCue() {
+        if (!studyModeEnabled) {
+            Toast.makeText(this, "Switch to Study mode first.", Toast.LENGTH_SHORT).show()
             return
         }
-
-        basePositionMs = targetPosition
-        startedAtElapsedMs = SystemClock.elapsedRealtime()
-        isPlaying = playAfterSeek
-        updateOverlay()
-    }
-
-    private fun cueIndexAtOrBefore(positionMs: Long): Int {
-        var low = 0
-        var high = cues.lastIndex
-        var answer = -1
-        while (low <= high) {
-            val mid = (low + high) ushr 1
-            if (cues[mid].startMs <= positionMs) {
-                answer = mid
-                low = mid + 1
-            } else {
-                high = mid - 1
-            }
+        val cueIndex = renderedCueIndices.firstOrNull()
+        if (cueIndex == null) {
+            Toast.makeText(this, "Wait until a subtitle is visible, then try again.", Toast.LENGTH_SHORT).show()
+            return
         }
-        return answer
-    }
+        if (!hasControllableStudyPlayback()) return
 
-    private fun cueIndexAtOrAfter(positionMs: Long): Int {
-        var low = 0
-        var high = cues.lastIndex
-        var answer = cues.size
-        while (low <= high) {
-            val mid = (low + high) ushr 1
-            if (cues[mid].startMs >= positionMs) {
-                answer = mid
-                high = mid - 1
-            } else {
-                low = mid + 1
-            }
+        val command = runCatching {
+            studyPlaybackEngine?.startCue(cueIndex, studyRepeatCount, offsetMs)
+                ?: error("Study playback is unavailable.")
+        }.getOrElse { error ->
+            Toast.makeText(this, error.message ?: "Unable to start repetition.", Toast.LENGTH_LONG).show()
+            return
         }
-        return answer
+        studyStoppedByUser = false
+        executeStudyPlaybackCommand(command)
+        updateStudyStatus()
     }
 
-    private fun maybeAutoPauseForStudy(previousCueIndex: Int, subtitlePosition: Long) {
-        if (!studyModeEnabled || previousCueIndex !in cues.indices) return
-        if (studyAutoPausedCueIndex == previousCueIndex) return
-        if (subtitlePosition < cues[previousCueIndex].endMs) return
+    private fun playSelectedStudyCues() {
+        if (!studyModeEnabled) {
+            Toast.makeText(this, "Switch to Study mode first.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (selectedStudyCueIndices.isEmpty()) {
+            Toast.makeText(this, "Tap subtitles on the video to save them first.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (!hasControllableStudyPlayback()) return
 
+        val command = runCatching {
+            studyPlaybackEngine?.startPlaylist(selectedStudyCueIndices, studyRepeatCount, offsetMs)
+                ?: error("Study playback is unavailable.")
+        }.getOrElse { error ->
+            Toast.makeText(this, error.message ?: "Unable to start the study playlist.", Toast.LENGTH_LONG).show()
+            return
+        }
+        studyStoppedByUser = false
+        executeStudyPlaybackCommand(command)
+        updateStudyStatus()
+    }
+
+    private fun hasControllableStudyPlayback(): Boolean {
         val state = usablePlaybackState()
-        if (state != null && isPlaybackMoving(state.state)) {
-            studyAutoPausedCueIndex = previousCueIndex
-            runCatching { activeController?.transportControls?.pause() }
-        } else if (state == null && isPlaying) {
-            studyAutoPausedCueIndex = previousCueIndex
-            basePositionMs = manualPositionMs()
-            isPlaying = false
-            startedAtElapsedMs = SystemClock.elapsedRealtime()
+        if (state == null || state.actions and PlaybackState.ACTION_SEEK_TO == 0L) {
+            Toast.makeText(
+                this,
+                "This video app does not expose seek control to Android, so Subtitle Overlay cannot repeat video clips accurately. Saving study subtitles still works.",
+                Toast.LENGTH_LONG,
+            ).show()
+            return false
         }
+        return true
+    }
+
+    private fun stopStudyRepeat(pause: Boolean, userInitiated: Boolean) {
+        val engine = studyPlaybackEngine ?: return
+        val wasActive = engine.status().active
+        engine.stop()
+        if (pause && wasActive) {
+            runCatching { activeController?.transportControls?.pause() }
+        }
+        if (userInitiated && wasActive) {
+            studyStoppedByUser = true
+        }
+        updateStudyStatus()
+    }
+
+    private fun updateStudyPlayback(positionMs: Long) {
+        val command = studyPlaybackEngine?.onPosition(positionMs, offsetMs) ?: return
+        executeStudyPlaybackCommand(command)
+        updateStudyStatus()
+    }
+
+    private fun executeStudyPlaybackCommand(command: StudyPlaybackCommand) {
+        when (command) {
+            is StudyPlaybackCommand.SeekAndPlay -> runCatching {
+                activeController?.transportControls?.seekTo(command.positionMs)
+                activeController?.transportControls?.play()
+            }.onFailure {
+                stopStudyRepeat(pause = false, userInitiated = false)
+            }
+            is StudyPlaybackCommand.PauseAndSeek -> runCatching {
+                activeController?.transportControls?.pause()
+                activeController?.transportControls?.seekTo(command.positionMs)
+            }.onFailure {
+                stopStudyRepeat(pause = false, userInitiated = false)
+            }
+            StudyPlaybackCommand.ContinuePlaying -> runCatching {
+                activeController?.transportControls?.play()
+            }
+        }
+    }
+
+    private fun updateStudyModeUi() {
+        watchModeView?.apply {
+            background = if (!studyModeEnabled) activeModeBackground() else chipBackground()
+            setTextColor(if (!studyModeEnabled) COLOR_ACTIVE_MODE_TEXT else Color.WHITE)
+        }
+        studyModeView?.apply {
+            background = if (studyModeEnabled) activeModeBackground() else chipBackground()
+            setTextColor(if (studyModeEnabled) COLOR_ACTIVE_MODE_TEXT else Color.WHITE)
+        }
+        studyRepeatView?.text = "${studyRepeatCount}×"
+        updateStudyStatus()
+    }
+
+    private fun updateStudyStatus() {
+        val status = studyPlaybackEngine?.status()
+        studyStatusView?.text = when {
+            status?.active == true && status.playlistTotal > 0 -> {
+                "Clip ${status.playlistPosition + 1}/${status.playlistTotal} · repeat ${status.completed + 1}/${status.total} · ${selectedStudyCueIndices.size} saved"
+            }
+            status?.active == true -> {
+                "Repeating ${status.completed + 1}/${status.total} · ${selectedStudyCueIndices.size} saved"
+            }
+            status?.playlistComplete == true -> {
+                "Selected clips completed · ${selectedStudyCueIndices.size} saved"
+            }
+            studyStoppedByUser -> {
+                "Repetition stopped · ${selectedStudyCueIndices.size} saved"
+            }
+            studyModeEnabled -> {
+                "${selectedStudyCueIndices.size} saved · tap a subtitle to save/remove"
+            }
+            else -> {
+                "${selectedStudyCueIndices.size} saved · switch to Study to select clips"
+            }
+        }
+    }
+
+    private fun updateSubtitleTouchability() {
+        val view = subtitleView ?: return
+        val params = view.layoutParams as? WindowManager.LayoutParams ?: return
+        params.flags = if (studyModeEnabled) {
+            params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        } else {
+            params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        }
+        view.isClickable = studyModeEnabled
+        view.contentDescription = if (studyModeEnabled) {
+            "Tap subtitle to save or remove it from the study list"
+        } else {
+            null
+        }
+        windowManager.updateViewLayout(view, params)
+    }
+
+    private fun updateSubtitleAppearance() {
+        val view = subtitleView ?: return
+        val studyVisible = studyModeEnabled && renderedCueIndices.isNotEmpty()
+        val selected = studyVisible && renderedCueIndices.all(selectedStudyCueIndices::contains)
+        view.background = when {
+            selected -> roundedBackground(COLOR_STUDY_SELECTED_FILL, dp(8), COLOR_STUDY_ACCENT)
+            studyVisible -> roundedBackground(Color.argb(175, 8, 8, 10), dp(8), COLOR_STUDY_BORDER)
+            else -> normalSubtitleBackground()
+        }
+    }
+
+    private fun normalSubtitleBackground() = roundedBackground(Color.argb(175, 8, 8, 10), dp(8))
+
+    private fun activeModeBackground() = roundedBackground(COLOR_STUDY_ACCENT, dp(9), COLOR_STUDY_ACCENT)
+
+    private fun restoreStudySelection() {
+        selectedStudyCueIndices.clear()
+        if (subtitleListId.isBlank()) return
+        val stored = getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE)
+            .getString(studySelectionKey(subtitleListId), "")
+            .orEmpty()
+        stored.split(',')
+            .mapNotNull(String::toIntOrNull)
+            .filterTo(selectedStudyCueIndices) { it in cues.indices }
+    }
+
+    private fun saveStudySelection() {
+        if (subtitleListId.isBlank()) return
+        val preferences = getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE)
+        preferences.edit {
+            putString(
+                studySelectionKey(subtitleListId),
+                selectedStudyCueIndices.sorted().joinToString(","),
+            )
+            putLong(studySelectionUpdatedKey(subtitleListId), System.currentTimeMillis())
+        }
+        pruneStudySelections(preferences)
+    }
+
+    private fun pruneStudySelections(preferences: android.content.SharedPreferences) {
+        val ids = preferences.all.keys
+            .filter { it.startsWith(KEY_STUDY_SELECTION_PREFIX) }
+            .map { it.removePrefix(KEY_STUDY_SELECTION_PREFIX) }
+        if (ids.size <= MAX_STORED_STUDY_SELECTIONS) return
+
+        val removeIds = ids
+            .sortedByDescending { id -> preferences.getLong(studySelectionUpdatedKey(id), 0L) }
+            .drop(MAX_STORED_STUDY_SELECTIONS)
+        preferences.edit {
+            for (id in removeIds) {
+                remove(studySelectionKey(id))
+                remove(studySelectionUpdatedKey(id))
+            }
+        }
+    }
+
+    private fun studySelectionKey(id: String) = "$KEY_STUDY_SELECTION_PREFIX$id"
+
+    private fun studySelectionUpdatedKey(id: String) = "$KEY_STUDY_SELECTION_UPDATED_PREFIX$id"
+
+    private fun subtitleFingerprint(filename: String, content: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest("$filename\u0000$content".toByteArray(Charsets.UTF_8))
+        return digest.take(12).joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+    }
+
+    private fun queryDisplayName(uri: android.net.Uri): String {
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (index >= 0 && cursor.moveToFirst()) {
+                return cursor.getString(index) ?: "subtitles.srt"
+            }
+        }
+        return uri.lastPathSegment ?: "subtitles.srt"
     }
 
     private fun manualPositionMs(): Long {
@@ -734,24 +989,34 @@ class OverlayService : Service() {
     private fun updateOverlay() {
         subtitleView?.maxWidth = resources.displayMetrics.widthPixels - dp(32)
         val rawPosition = currentPositionMs()
+        if (usablePlaybackState() != null) {
+            updateStudyPlayback(rawPosition)
+        }
+
         val subtitlePosition = rawPosition - offsetMs
-        val index = findCueIndex(subtitlePosition)
-        val previousCueIndex = lastCueIndex
-        if (index != previousCueIndex) {
-            maybeAutoPauseForStudy(previousCueIndex, subtitlePosition)
-            lastCueIndex = index
+        val nextRenderedCueIndices = activeCueIndices(subtitlePosition)
+        if (nextRenderedCueIndices != renderedCueIndices) {
+            renderedCueIndices = nextRenderedCueIndices
             subtitleView?.apply {
-                if (index >= 0) {
-                    text = cues[index].text
+                if (renderedCueIndices.isNotEmpty()) {
+                    text = renderedCueIndices.joinToString("\n") { index -> cues[index].text }
                     visibility = View.VISIBLE
                 } else {
                     text = ""
                     visibility = View.INVISIBLE
                 }
             }
+            updateSubtitleAppearance()
         }
+
         positionView?.text = "${formatTime(rawPosition)}  Δ${formatOffset(offsetMs)}"
         updateControllerState()
+        updateStudyStatus()
+    }
+
+    private fun activeCueIndices(positionMs: Long): List<Int> = cues.indices.filter { index ->
+        val cue = cues[index]
+        cue.startMs <= positionMs && positionMs < cue.endMs
     }
 
     private fun updateControllerState() {
@@ -777,22 +1042,6 @@ class OverlayService : Service() {
             playPauseView?.text = if (isPlaying) "Ⅱ" else "▶"
             speedView?.text = formatPlaybackSpeed(manualPlaybackSpeed)
         }
-        studyModeView?.text = if (studyModeEnabled) "Study ON" else "Study OFF"
-    }
-
-    private fun findCueIndex(positionMs: Long): Int {
-        var low = 0
-        var high = cues.lastIndex
-        while (low <= high) {
-            val mid = (low + high) ushr 1
-            val cue = cues[mid]
-            when {
-                positionMs < cue.startMs -> high = mid - 1
-                positionMs >= cue.endMs -> low = mid + 1
-                else -> return mid
-            }
-        }
-        return -1
     }
 
     private fun startSessionMonitoring() {
@@ -819,12 +1068,14 @@ class OverlayService : Service() {
 
     private fun refreshActiveController() {
         if (!hasNotificationAccess()) {
+            stopStudyRepeat(pause = false, userInitiated = false)
             detachController(preservePosition = true)
             return
         }
         runCatching {
             attachBestController(mediaSessionManager.getActiveSessions(listenerComponent()))
         }.onFailure {
+            stopStudyRepeat(pause = false, userInitiated = false)
             detachController(preservePosition = true)
         }
     }
@@ -841,6 +1092,9 @@ class OverlayService : Service() {
             }
 
         if (candidate?.sessionToken == activeController?.sessionToken) return
+        if (studyPlaybackEngine?.status()?.active == true) {
+            stopStudyRepeat(pause = false, userInitiated = false)
+        }
         detachController(preservePosition = true)
         activeController = candidate
         candidate?.registerCallback(mediaControllerCallback, handler)
@@ -964,6 +1218,10 @@ class OverlayService : Service() {
         private const val KEY_SUBTITLE_BOTTOM_MARGIN = "subtitle_bottom_margin_dp"
         private const val KEY_PLAYBACK_SPEED = "playback_speed"
         private const val KEY_STUDY_MODE = "study_mode_enabled"
+        private const val KEY_STUDY_REPEAT_COUNT = "study_repeat_count"
+        private const val KEY_STUDY_SELECTION_PREFIX = "study_selection_indices_"
+        private const val KEY_STUDY_SELECTION_UPDATED_PREFIX = "study_selection_updated_"
+        private const val MAX_STORED_STUDY_SELECTIONS = 20
         private const val DEFAULT_SUBTITLE_TEXT_SIZE_SP = 22f
         private const val MIN_SUBTITLE_TEXT_SIZE_SP = 14f
         private const val MAX_SUBTITLE_TEXT_SIZE_SP = 36f
@@ -979,6 +1237,11 @@ class OverlayService : Service() {
         private const val COLOR_MANUAL = 0xFFFFCC80.toInt()
         private const val COLOR_PANEL_BORDER = 0xFF44424D.toInt()
         private const val COLOR_BUTTON_BORDER = 0xFF686571.toInt()
+        private const val COLOR_MUTED_TEXT = 0xFFB8C3CC.toInt()
+        private const val COLOR_STUDY_ACCENT = 0xFFB9FF5A.toInt()
+        private const val COLOR_STUDY_BORDER = 0xFF78A63A.toInt()
+        private const val COLOR_STUDY_SELECTED_FILL = 0xD2142D0A.toInt()
+        private const val COLOR_ACTIVE_MODE_TEXT = 0xFF10150D.toInt()
         private val PLAYBACK_SPEEDS = floatArrayOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
         private val SUPPORTED_VIDEO_PACKAGES = setOf(
             NETFLIX_PACKAGE,
