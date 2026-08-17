@@ -8,6 +8,12 @@ local.properties
 **/build/
 captures/
 
+# Android signing credentials - never commit these
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+
 # OS files
 .DS_Store
 Thumbs.db

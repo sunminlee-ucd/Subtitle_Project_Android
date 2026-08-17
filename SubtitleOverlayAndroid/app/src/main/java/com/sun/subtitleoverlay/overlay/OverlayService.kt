@@ -15,6 +15,7 @@ import android.graphics.drawable.StateListDrawable
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
+import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -46,6 +47,8 @@ class OverlayService : Service() {
     private var positionView: TextView? = null
     private var statusView: TextView? = null
     private var playPauseView: TextView? = null
+    private var speedView: TextView? = null
+    private var studyModeView: TextView? = null
     private var cues: List<SubtitleCue> = emptyList()
     private val handler = Handler(Looper.getMainLooper())
 
@@ -53,6 +56,9 @@ class OverlayService : Service() {
     private var basePositionMs = 0L
     private var startedAtElapsedMs = 0L
     private var offsetMs = 0L
+    private var manualPlaybackSpeed = DEFAULT_PLAYBACK_SPEED
+    private var studyModeEnabled = false
+    private var studyAutoPausedCueIndex = -1
     private var subtitleTextSizeSp = DEFAULT_SUBTITLE_TEXT_SIZE_SP
     private var subtitleBottomMarginDp = DEFAULT_SUBTITLE_BOTTOM_MARGIN_DP
     private var lastCueIndex = -1
@@ -89,10 +95,12 @@ class OverlayService : Service() {
         super.onCreate()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         mediaSessionManager = getSystemService(MEDIA_SESSION_SERVICE) as MediaSessionManager
-        subtitleTextSizeSp = getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE)
-            .getFloat(KEY_SUBTITLE_TEXT_SIZE, DEFAULT_SUBTITLE_TEXT_SIZE_SP)
-        subtitleBottomMarginDp = getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE)
-            .getInt(KEY_SUBTITLE_BOTTOM_MARGIN, DEFAULT_SUBTITLE_BOTTOM_MARGIN_DP)
+        val preferences = getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE)
+        subtitleTextSizeSp = preferences.getFloat(KEY_SUBTITLE_TEXT_SIZE, DEFAULT_SUBTITLE_TEXT_SIZE_SP)
+        subtitleBottomMarginDp = preferences.getInt(KEY_SUBTITLE_BOTTOM_MARGIN, DEFAULT_SUBTITLE_BOTTOM_MARGIN_DP)
+        manualPlaybackSpeed = preferences.getFloat(KEY_PLAYBACK_SPEED, DEFAULT_PLAYBACK_SPEED)
+            .coerceIn(PLAYBACK_SPEEDS.first(), PLAYBACK_SPEEDS.last())
+        studyModeEnabled = preferences.getBoolean(KEY_STUDY_MODE, false)
         createNotificationChannel()
     }
 
@@ -227,6 +235,13 @@ class OverlayService : Service() {
         playPauseView = chip("▶", widthDp = 42, textSizeSp = 17f, description = "Play or pause") { togglePlayback() }
         playbackControls.addView(playPauseView)
         playbackControls.addView(chip("+5", description = "Forward 5 seconds") { seekBy(5_000L) })
+        speedView = chip(
+            formatPlaybackSpeed(manualPlaybackSpeed),
+            widthDp = 48,
+            textSizeSp = 11f,
+            description = "Change playback speed",
+        ) { cyclePlaybackSpeed() }
+        playbackControls.addView(speedView)
         panel.addView(collapsibleSection("Playback", playbackControls))
 
         val subtitleControls = LinearLayout(this).apply {
@@ -259,6 +274,23 @@ class OverlayService : Service() {
             resetSubtitlePosition()
         })
         panel.addView(collapsibleSection("Subtitle position", positionControls))
+
+        val studyControls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, dp(5), 0, 0)
+        }
+        studyModeView = chip(
+            if (studyModeEnabled) "Study ON" else "Study OFF",
+            widthDp = 72,
+            textSizeSp = 10f,
+            description = "Toggle study mode",
+        ) { toggleStudyMode() }
+        studyControls.addView(studyModeView)
+        studyControls.addView(chip("◀", textSizeSp = 16f, description = "Previous subtitle") { previousStudyCue() })
+        studyControls.addView(chip("↺", textSizeSp = 17f, description = "Replay current subtitle") { replayStudyCue() })
+        studyControls.addView(chip("▶", textSizeSp = 16f, description = "Next subtitle") { nextStudyCue() })
+        panel.addView(collapsibleSection("Study mode", studyControls))
 
         makeDraggable(panel)
         return panel
@@ -465,6 +497,7 @@ class OverlayService : Service() {
         startedAtElapsedMs = SystemClock.elapsedRealtime()
         offsetMs = 0L
         lastCueIndex = -1
+        studyAutoPausedCueIndex = -1
         updateOverlay()
     }
 
@@ -495,6 +528,7 @@ class OverlayService : Service() {
         val mediaPosition = mediaPositionMs()
         val state = usablePlaybackState()
         if (mediaPosition != null && state != null && state.actions and PlaybackState.ACTION_SEEK_TO != 0L) {
+            studyAutoPausedCueIndex = -1
             activeController?.transportControls?.seekTo((mediaPosition + deltaMs).coerceAtLeast(0L))
             return
         }
@@ -502,12 +536,182 @@ class OverlayService : Service() {
         basePositionMs = (manualPositionMs() + deltaMs).coerceAtLeast(0L)
         startedAtElapsedMs = SystemClock.elapsedRealtime()
         lastCueIndex = -1
+        studyAutoPausedCueIndex = -1
         updateOverlay()
+    }
+
+    private fun cyclePlaybackSpeed() {
+        val state = usablePlaybackState()
+        val currentSpeed = state?.playbackSpeed?.takeIf { it > 0f } ?: manualPlaybackSpeed
+        val nextSpeed = nextPlaybackSpeed(currentSpeed)
+
+        if (state != null) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+                state.actions and PlaybackState.ACTION_SET_PLAYBACK_SPEED == 0L
+            ) {
+                Toast.makeText(
+                    this,
+                    "This video app does not expose playback-speed control to Subtitle Overlay.",
+                    Toast.LENGTH_LONG,
+                ).show()
+                return
+            }
+            runCatching {
+                activeController?.transportControls?.setPlaybackSpeed(nextSpeed)
+            }.onSuccess {
+                manualPlaybackSpeed = nextSpeed
+                savePlaybackSpeed()
+                speedView?.text = formatPlaybackSpeed(nextSpeed)
+            }.onFailure {
+                Toast.makeText(this, "Unable to change playback speed.", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+
+        basePositionMs = manualPositionMs()
+        startedAtElapsedMs = SystemClock.elapsedRealtime()
+        manualPlaybackSpeed = nextSpeed
+        savePlaybackSpeed()
+        speedView?.text = formatPlaybackSpeed(nextSpeed)
+        updateOverlay()
+    }
+
+    private fun nextPlaybackSpeed(current: Float): Float {
+        val currentIndex = PLAYBACK_SPEEDS.indices.minByOrNull { index ->
+            kotlin.math.abs(PLAYBACK_SPEEDS[index] - current)
+        } ?: 0
+        return PLAYBACK_SPEEDS[(currentIndex + 1) % PLAYBACK_SPEEDS.size]
+    }
+
+    private fun savePlaybackSpeed() {
+        getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE).edit {
+            putFloat(KEY_PLAYBACK_SPEED, manualPlaybackSpeed)
+        }
+    }
+
+    private fun toggleStudyMode() {
+        studyModeEnabled = !studyModeEnabled
+        studyAutoPausedCueIndex = -1
+        getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE).edit {
+            putBoolean(KEY_STUDY_MODE, studyModeEnabled)
+        }
+        studyModeView?.text = if (studyModeEnabled) "Study ON" else "Study OFF"
+        if (studyModeEnabled && usablePlaybackState() == null) {
+            Toast.makeText(
+                this,
+                "Study mode is on. Automatic video pause requires a controllable MediaSession; subtitle navigation still works.",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+
+    private fun previousStudyCue() {
+        if (cues.isEmpty()) return
+        val subtitlePosition = currentPositionMs() - offsetMs
+        val active = findCueIndex(subtitlePosition)
+        val target = if (active >= 0) {
+            (active - 1).coerceAtLeast(0)
+        } else {
+            cueIndexAtOrBefore(subtitlePosition).coerceAtLeast(0)
+        }
+        seekToStudyCue(target, playAfterSeek = false)
+    }
+
+    private fun replayStudyCue() {
+        if (cues.isEmpty()) return
+        val subtitlePosition = currentPositionMs() - offsetMs
+        val active = findCueIndex(subtitlePosition)
+        val target = if (active >= 0) active else cueIndexAtOrBefore(subtitlePosition).coerceAtLeast(0)
+        seekToStudyCue(target, playAfterSeek = true)
+    }
+
+    private fun nextStudyCue() {
+        if (cues.isEmpty()) return
+        val subtitlePosition = currentPositionMs() - offsetMs
+        val active = findCueIndex(subtitlePosition)
+        val target = if (active >= 0) {
+            (active + 1).coerceAtMost(cues.lastIndex)
+        } else {
+            cueIndexAtOrAfter(subtitlePosition).coerceIn(0, cues.lastIndex)
+        }
+        seekToStudyCue(target, playAfterSeek = false)
+    }
+
+    private fun seekToStudyCue(index: Int, playAfterSeek: Boolean) {
+        if (index !in cues.indices) return
+        val targetPosition = (cues[index].startMs + offsetMs).coerceAtLeast(0L)
+        studyAutoPausedCueIndex = -1
+        lastCueIndex = -1
+
+        val state = usablePlaybackState()
+        if (state != null && state.actions and PlaybackState.ACTION_SEEK_TO != 0L) {
+            runCatching {
+                activeController?.transportControls?.seekTo(targetPosition)
+                if (playAfterSeek) activeController?.transportControls?.play()
+                else activeController?.transportControls?.pause()
+            }
+            return
+        }
+
+        basePositionMs = targetPosition
+        startedAtElapsedMs = SystemClock.elapsedRealtime()
+        isPlaying = playAfterSeek
+        updateOverlay()
+    }
+
+    private fun cueIndexAtOrBefore(positionMs: Long): Int {
+        var low = 0
+        var high = cues.lastIndex
+        var answer = -1
+        while (low <= high) {
+            val mid = (low + high) ushr 1
+            if (cues[mid].startMs <= positionMs) {
+                answer = mid
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+        return answer
+    }
+
+    private fun cueIndexAtOrAfter(positionMs: Long): Int {
+        var low = 0
+        var high = cues.lastIndex
+        var answer = cues.size
+        while (low <= high) {
+            val mid = (low + high) ushr 1
+            if (cues[mid].startMs >= positionMs) {
+                answer = mid
+                high = mid - 1
+            } else {
+                low = mid + 1
+            }
+        }
+        return answer
+    }
+
+    private fun maybeAutoPauseForStudy(previousCueIndex: Int, subtitlePosition: Long) {
+        if (!studyModeEnabled || previousCueIndex !in cues.indices) return
+        if (studyAutoPausedCueIndex == previousCueIndex) return
+        if (subtitlePosition < cues[previousCueIndex].endMs) return
+
+        val state = usablePlaybackState()
+        if (state != null && isPlaybackMoving(state.state)) {
+            studyAutoPausedCueIndex = previousCueIndex
+            runCatching { activeController?.transportControls?.pause() }
+        } else if (state == null && isPlaying) {
+            studyAutoPausedCueIndex = previousCueIndex
+            basePositionMs = manualPositionMs()
+            isPlaying = false
+            startedAtElapsedMs = SystemClock.elapsedRealtime()
+        }
     }
 
     private fun manualPositionMs(): Long {
         if (!isPlaying) return basePositionMs
-        return basePositionMs + (SystemClock.elapsedRealtime() - startedAtElapsedMs)
+        val elapsed = SystemClock.elapsedRealtime() - startedAtElapsedMs
+        return basePositionMs + (elapsed * manualPlaybackSpeed).toLong()
     }
 
     private fun currentPositionMs(): Long = mediaPositionMs() ?: manualPositionMs()
@@ -532,7 +736,9 @@ class OverlayService : Service() {
         val rawPosition = currentPositionMs()
         val subtitlePosition = rawPosition - offsetMs
         val index = findCueIndex(subtitlePosition)
-        if (index != lastCueIndex) {
+        val previousCueIndex = lastCueIndex
+        if (index != previousCueIndex) {
+            maybeAutoPauseForStudy(previousCueIndex, subtitlePosition)
             lastCueIndex = index
             subtitleView?.apply {
                 if (index >= 0) {
@@ -561,13 +767,17 @@ class OverlayService : Service() {
                 setTextColor(COLOR_AUTO)
             }
             playPauseView?.text = if (isPlaybackMoving(state.state)) "Ⅱ" else "▶"
+            val activeSpeed = state.playbackSpeed.takeIf { it > 0f } ?: manualPlaybackSpeed
+            speedView?.text = formatPlaybackSpeed(activeSpeed)
         } else {
             statusView?.apply {
                 text = if (hasNotificationAccess()) "WAITING" else "MANUAL"
                 setTextColor(COLOR_MANUAL)
             }
             playPauseView?.text = if (isPlaying) "Ⅱ" else "▶"
+            speedView?.text = formatPlaybackSpeed(manualPlaybackSpeed)
         }
+        studyModeView?.text = if (studyModeEnabled) "Study ON" else "Study OFF"
     }
 
     private fun findCueIndex(positionMs: Long): Int {
@@ -639,10 +849,14 @@ class OverlayService : Service() {
 
     private fun detachController(preservePosition: Boolean) {
         if (preservePosition) {
+            val state = activeController?.playbackState
             mediaPositionMs()?.let { position ->
                 basePositionMs = position
                 startedAtElapsedMs = SystemClock.elapsedRealtime()
-                isPlaying = activeController?.playbackState?.let { isPlaybackMoving(it.state) } == true
+                isPlaying = state?.let { isPlaybackMoving(it.state) } == true
+                state?.playbackSpeed?.takeIf { it > 0f }?.let { speed ->
+                    manualPlaybackSpeed = speed.coerceIn(PLAYBACK_SPEEDS.first(), PLAYBACK_SPEEDS.last())
+                }
             }
         }
         activeController?.unregisterCallback(mediaControllerCallback)
@@ -670,6 +884,11 @@ class OverlayService : Service() {
     }
 
     private fun formatOffset(ms: Long): String = "%+.1fs".format(ms / 1_000.0)
+
+    private fun formatPlaybackSpeed(speed: Float): String = when {
+        kotlin.math.abs(speed - speed.toInt()) < 0.01f -> "${speed.toInt()}×"
+        else -> "%.2g×".format(speed)
+    }
 
     private fun buildNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.ic_media_play)
@@ -743,6 +962,8 @@ class OverlayService : Service() {
         private const val SESSION_REFRESH_MS = 1_500L
         private const val KEY_SUBTITLE_TEXT_SIZE = "subtitle_text_size_sp"
         private const val KEY_SUBTITLE_BOTTOM_MARGIN = "subtitle_bottom_margin_dp"
+        private const val KEY_PLAYBACK_SPEED = "playback_speed"
+        private const val KEY_STUDY_MODE = "study_mode_enabled"
         private const val DEFAULT_SUBTITLE_TEXT_SIZE_SP = 22f
         private const val MIN_SUBTITLE_TEXT_SIZE_SP = 14f
         private const val MAX_SUBTITLE_TEXT_SIZE_SP = 36f
@@ -751,12 +972,14 @@ class OverlayService : Service() {
         private const val MIN_SUBTITLE_BOTTOM_MARGIN_DP = 0
         private const val MAX_SUBTITLE_BOTTOM_MARGIN_DP = 240
         private const val POSITION_STEP_DP = 12
+        private const val DEFAULT_PLAYBACK_SPEED = 1f
         private const val NETFLIX_PACKAGE = "com.netflix.mediaclient"
         private const val YOUTUBE_PACKAGE = "com.google.android.youtube"
         private const val COLOR_AUTO = 0xFF78E08F.toInt()
         private const val COLOR_MANUAL = 0xFFFFCC80.toInt()
         private const val COLOR_PANEL_BORDER = 0xFF44424D.toInt()
         private const val COLOR_BUTTON_BORDER = 0xFF686571.toInt()
+        private val PLAYBACK_SPEEDS = floatArrayOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
         private val SUPPORTED_VIDEO_PACKAGES = setOf(
             NETFLIX_PACKAGE,
             YOUTUBE_PACKAGE,
