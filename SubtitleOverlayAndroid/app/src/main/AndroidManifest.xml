@@ -24,6 +24,10 @@
         </activity>
 
         <activity
+            android:name=".study.StudySavedCuesActivity"
+            android:exported="false" />
+
+        <activity
             android:name=".RestoreControlsActivity"
             android:excludeFromRecents="true"
             android:exported="false"
