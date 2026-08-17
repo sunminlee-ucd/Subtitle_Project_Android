@@ -4,12 +4,12 @@ plugins {
 
 android {
     namespace = "com.sun.subtitleoverlay"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.sun.subtitleoverlay"
         minSdk = 26
-        targetSdk = 36
+        targetSdk = 37
         versionCode = 3
         versionName = "0.2.1"
 
