@@ -34,7 +34,6 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.edit
 import androidx.core.net.toUri
 import com.sun.subtitleoverlay.MainActivity
-import com.sun.subtitleoverlay.RestoreControlsActivity
 import com.sun.subtitleoverlay.playback.PlaybackNotificationListener
 import com.sun.subtitleoverlay.study.StudyPlaybackCommand
 import com.sun.subtitleoverlay.study.StudyPlaybackEngine
@@ -54,8 +53,6 @@ class OverlayService : Service() {
     private var statusView: TextView? = null
     private var playPauseView: TextView? = null
     private var speedView: TextView? = null
-    private var watchModeView: TextView? = null
-    private var studyModeView: TextView? = null
     private var studyRepeatView: TextView? = null
     private var studyStatusView: TextView? = null
 
@@ -323,14 +320,6 @@ class OverlayService : Service() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        watchModeView = chip("Watch", widthDp = 58, textSizeSp = 10f, description = "Switch to Watch mode") {
-            setStudyMode(false)
-        }
-        studyModeView = chip("Study", widthDp = 58, textSizeSp = 10f, description = "Switch to Study mode") {
-            setStudyMode(true)
-        }
-        modeRow.addView(watchModeView)
-        modeRow.addView(studyModeView)
         modeRow.addView(chip("−", widthDp = 30, textSizeSp = 16f, description = "Decrease study repeat count") {
             changeStudyRepeatCount(-1)
         })
@@ -370,7 +359,14 @@ class OverlayService : Service() {
             setPadding(dp(5), dp(5), dp(5), 0)
         }
         studyControls.addView(studyStatusView)
-        panel.addView(collapsibleSection("Study mode", studyControls))
+        panel.addView(
+            collapsibleSection(
+                title = "Study mode",
+                content = studyControls,
+                initiallyExpanded = studyModeEnabled,
+                onExpandedChanged = ::setStudyMode,
+            )
+        )
 
         makeDraggable(panel)
         return panel
@@ -380,6 +376,7 @@ class OverlayService : Service() {
         title: String,
         content: View,
         initiallyExpanded: Boolean = false,
+        onExpandedChanged: ((Boolean) -> Unit)? = null,
     ): LinearLayout {
         var expanded = initiallyExpanded
         val section = LinearLayout(this).apply {
@@ -413,6 +410,7 @@ class OverlayService : Service() {
         sectionHeader.setOnClickListener {
             expanded = !expanded
             renderState()
+            onExpandedChanged?.invoke(expanded)
             section.requestLayout()
             controllerView?.requestLayout()
         }
@@ -845,14 +843,6 @@ class OverlayService : Service() {
     }
 
     private fun updateStudyModeUi() {
-        watchModeView?.apply {
-            background = if (!studyModeEnabled) activeModeBackground() else chipBackground()
-            setTextColor(if (!studyModeEnabled) COLOR_ACTIVE_MODE_TEXT else Color.WHITE)
-        }
-        studyModeView?.apply {
-            background = if (studyModeEnabled) activeModeBackground() else chipBackground()
-            setTextColor(if (studyModeEnabled) COLOR_ACTIVE_MODE_TEXT else Color.WHITE)
-        }
         studyRepeatView?.text = "${studyRepeatCount}×"
         updateStudyStatus()
     }
@@ -876,7 +866,7 @@ class OverlayService : Service() {
                 "${selectedStudyCueIndices.size} saved · tap a subtitle to save/remove"
             }
             else -> {
-                "${selectedStudyCueIndices.size} saved · switch to Study to select clips"
+                "${selectedStudyCueIndices.size} saved · expand Study mode to select clips"
             }
         }
     }
@@ -910,8 +900,6 @@ class OverlayService : Service() {
     }
 
     private fun normalSubtitleBackground() = roundedBackground(Color.argb(175, 8, 8, 10), dp(8))
-
-    private fun activeModeBackground() = roundedBackground(COLOR_STUDY_ACCENT, dp(9), COLOR_STUDY_ACCENT)
 
     private fun restoreStudySelection() {
         selectedStudyCueIndices.clear()
@@ -1158,20 +1146,13 @@ class OverlayService : Service() {
     private fun buildNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.ic_media_play)
         .setContentTitle("Subtitle overlay is running")
-        .setContentText("Tap Controls to restore the hidden interface.")
+        .setContentText("Tap to restore the hidden control panel.")
         .setOngoing(true)
-        .setContentIntent(
-            PendingIntent.getActivity(
-                this,
-                0,
-                Intent(this, MainActivity::class.java),
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-            )
-        )
+        .setContentIntent(servicePendingIntent(ACTION_SHOW_CONTROLS, 0))
         .addAction(
             android.R.drawable.ic_menu_view,
             "Controls",
-            restoreControlsPendingIntent(),
+            servicePendingIntent(ACTION_SHOW_CONTROLS, 1),
         )
         .addAction(
             android.R.drawable.ic_menu_close_clear_cancel,
@@ -1184,14 +1165,6 @@ class OverlayService : Service() {
         this,
         requestCode,
         Intent(this, OverlayService::class.java).setAction(action),
-        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-    )
-
-    private fun restoreControlsPendingIntent() = PendingIntent.getActivity(
-        this,
-        1,
-        Intent(this, RestoreControlsActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION),
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
 
@@ -1252,7 +1225,6 @@ class OverlayService : Service() {
         private const val COLOR_STUDY_ACCENT = 0xFFB9FF5A.toInt()
         private const val COLOR_STUDY_BORDER = 0xFF78A63A.toInt()
         private const val COLOR_STUDY_SELECTED_FILL = 0xD2142D0A.toInt()
-        private const val COLOR_ACTIVE_MODE_TEXT = 0xFF10150D.toInt()
         private val PLAYBACK_SPEEDS = floatArrayOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
         private val SUPPORTED_VIDEO_PACKAGES = setOf(
             NETFLIX_PACKAGE,
