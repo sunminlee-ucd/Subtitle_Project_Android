@@ -35,24 +35,25 @@ jobs:
               text = text.replace(import_anchor, import_anchor + import_line, 1)
 
           button_anchor = '        actionRow.addView(chip("Stop", widthDp = 44, textSizeSp = 9f, description = "Stop study repetition") {'
-          button = '''        actionRow.addView(chip("Saved list", widthDp = 60, textSizeSp = 9f, description = "Search saved study subtitles") {
-              openStudySavedCues()
-          })
-'''
+          button = (
+              '        actionRow.addView(chip("Saved list", widthDp = 60, textSizeSp = 9f, description = "Search saved study subtitles") {\n'
+              '            openStudySavedCues()\n'
+              '        })\n'
+          )
           if 'description = "Search saved study subtitles"' not in text:
               if button_anchor not in text:
                   raise SystemExit('Study action-row anchor not found')
               text = text.replace(button_anchor, button + button_anchor, 1)
 
           helper_anchor = '    private fun hasControllableStudyPlayback(): Boolean {'
-          helper = '''    private fun openStudySavedCues() {
-        startActivity(
-            Intent(this, StudySavedCuesActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-        )
-    }
-
-'''
+          helper = (
+              '    private fun openStudySavedCues() {\n'
+              '        startActivity(\n'
+              '            Intent(this, StudySavedCuesActivity::class.java)\n'
+              '                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),\n'
+              '        )\n'
+              '    }\n\n'
+          )
           if 'private fun openStudySavedCues()' not in text:
               if helper_anchor not in text:
                   raise SystemExit('Study helper anchor not found')
