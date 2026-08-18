@@ -17,6 +17,23 @@ object SrtParser {
             .sortedBy(SubtitleCue::startMs)
     }
 
+    fun render(cues: List<SubtitleCue>): String {
+        return cues
+            .sortedBy(SubtitleCue::startMs)
+            .mapIndexed { index, cue ->
+                buildString {
+                    append(index + 1)
+                    append('\n')
+                    append(formatTimestamp(cue.startMs))
+                    append(" --> ")
+                    append(formatTimestamp(cue.endMs))
+                    append('\n')
+                    append(cue.text.trim())
+                }
+            }
+            .joinToString("\n\n", postfix = "\n")
+    }
+
     private fun parseBlock(block: String): SubtitleCue? {
         val lines = block.lines().map(String::trimEnd).filter(String::isNotBlank)
         val timingIndex = lines.indexOfFirst { timingLine.matches(it) }
@@ -39,5 +56,13 @@ object SrtParser {
         val millis = groups[offset + 3].toLong()
         return hours * 3_600_000L + minutes * 60_000L + seconds * 1_000L + millis
     }
-}
 
+    private fun formatTimestamp(milliseconds: Long): String {
+        val safe = milliseconds.coerceAtLeast(0L)
+        val hours = safe / 3_600_000L
+        val minutes = (safe / 60_000L) % 60L
+        val seconds = (safe / 1_000L) % 60L
+        val millis = safe % 1_000L
+        return "%02d:%02d:%02d,%03d".format(hours, minutes, seconds, millis)
+    }
+}
