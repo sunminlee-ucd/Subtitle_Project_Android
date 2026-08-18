@@ -1,6 +1,7 @@
 package com.sun.subtitleoverlay.subtitle
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SrtParserTest {
@@ -43,5 +44,19 @@ class SrtParserTest {
 
         assertEquals(listOf("earlier", "later"), cues.map { it.text })
     }
-}
 
+    @Test
+    fun rendersAuthorizedCuesToTemporarySrtAndParsesThemBack() {
+        val original = listOf(
+            SubtitleCue(1_250L, 3_000L, "First line\nSecond line"),
+            SubtitleCue(3_723_004L, 3_725_500L, "Later cue"),
+        )
+
+        val rendered = SrtParser.render(original)
+        val reparsed = SrtParser.parse(rendered)
+
+        assertTrue(rendered.contains("00:00:01,250 --> 00:00:03,000"))
+        assertTrue(rendered.contains("01:02:03,004 --> 01:02:05,500"))
+        assertEquals(original, reparsed)
+    }
+}
