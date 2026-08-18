@@ -23,6 +23,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import androidx.core.content.edit
 import androidx.core.net.toUri
 import com.sun.subtitleoverlay.customer.AuthorizedSubtitleTrack
 import com.sun.subtitleoverlay.customer.CustomerBackendConfig
@@ -59,6 +61,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         File(cacheDir, AUTHORIZED_CACHE_FILENAME).delete()
+        preferences.edit { remove(KEY_LAST_SRT_URI) }
         setContentView(buildContent())
         requestNotificationPermissionIfNeeded()
         restoreCustomerSession()
@@ -340,16 +343,22 @@ class MainActivity : ComponentActivity() {
             }
             runOnUiThread {
                 result.onSuccess { prepared ->
+                    val contentUri = FileProvider.getUriForFile(
+                        this,
+                        "$packageName.privatefiles",
+                        prepared.file,
+                    )
                     val intent = Intent(this, OverlayService::class.java).apply {
                         action = OverlayService.ACTION_START
-                        putExtra(OverlayService.EXTRA_AUTHORIZED_SRT_PATH, prepared.file.absolutePath)
-                        putExtra(OverlayService.EXTRA_AUTHORIZED_TRACK_LABEL, prepared.label)
+                        data = contentUri
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     }
                     ContextCompat.startForegroundService(this, intent)
+                    window.decorView.postDelayed({ prepared.file.delete() }, CACHE_DELETE_DELAY_MS)
                     setStatus("")
                     Toast.makeText(
                         this,
-                        "${prepared.cueCount} subtitle cues loaded.",
+                        "${prepared.cueCount} subtitle cues loaded: ${prepared.label}",
                         Toast.LENGTH_SHORT,
                     ).show()
                     moveTaskToBack(true)
@@ -485,7 +494,9 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val PREFS_NAME = "subtitle_overlay"
+        const val KEY_LAST_SRT_URI = "last_srt_uri"
         private const val AUTHORIZED_CACHE_FILENAME = "authorized-subtitle.srt"
+        private const val CACHE_DELETE_DELAY_MS = 5_000L
         private const val COLOR_SURFACE = 0xFFF6F5FA.toInt()
         private const val COLOR_PRIMARY = 0xFF6750A4.toInt()
         private const val COLOR_TEXT = 0xFF242329.toInt()
