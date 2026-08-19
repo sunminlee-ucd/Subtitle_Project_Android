@@ -18,6 +18,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -45,14 +46,20 @@ class MainActivity : ComponentActivity() {
     private lateinit var overlayPermissionButton: TextView
     private lateinit var playbackPermissionButton: TextView
     private lateinit var notificationPermissionButton: TextView
+    private lateinit var permissionDetailsContainer: LinearLayout
+    private lateinit var permissionToggleView: TextView
     private lateinit var searchInput: EditText
     private lateinit var libraryCountView: TextView
     private lateinit var tracksContainer: LinearLayout
     private lateinit var selectedTrackLabel: TextView
+    private lateinit var startOverlayButton: TextView
+    private lateinit var overlayLoadingRow: LinearLayout
+    private lateinit var overlayLoadingLabel: TextView
     private lateinit var statusView: TextView
 
     private var selectedTrack: AuthorizedSubtitleTrack? = null
     private var allTracks: List<AuthorizedSubtitleTrack> = emptyList()
+    private var overlayStartInProgress = false
     private val repository by lazy { CustomerSubtitleRepository(this) }
     private val executor = Executors.newSingleThreadExecutor()
 
@@ -165,10 +172,24 @@ class MainActivity : ComponentActivity() {
 
                 val permissionCard = sectionCard().apply {
                     addView(sectionEyebrow("DEVICE SETUP"), matchWrap(bottom = dp(5)))
-                    addView(sectionTitle("Permissions"), matchWrap(bottom = dp(6)))
-                    addView(sectionDescription(
-                        "Complete these once so subtitles can appear over Netflix and playback can stay in sync."
-                    ), matchWrap(bottom = dp(12)))
+
+                    val permissionHeader = LinearLayout(context).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                    }
+                    val permissionHeading = LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(sectionTitle("Permissions"), matchWrap())
+                    }
+                    permissionHeader.addView(
+                        permissionHeading,
+                        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    )
+                    permissionToggleView = compactButton("Hide") {
+                        setPermissionDetailsExpanded(permissionDetailsContainer.visibility != View.VISIBLE)
+                    }
+                    permissionHeader.addView(permissionToggleView)
+                    addView(permissionHeader, matchWrap(bottom = dp(9)))
 
                     permissionSummaryView = TextView(context).apply {
                         textSize = 12f
@@ -177,37 +198,45 @@ class MainActivity : ComponentActivity() {
                         background = roundedBackground(COLOR_WARNING_FILL, dp(10), COLOR_PRIMARY_DARK)
                         setTextColor(COLOR_TEXT)
                     }
-                    addView(permissionSummaryView, matchWrap(bottom = dp(12)))
+                    addView(permissionSummaryView, matchWrap(bottom = dp(10)))
 
-                    overlayPermissionButton = permissionActionButton("Grant") {
-                        openOverlaySettings()
-                    }
-                    addView(permissionRow(
-                        number = "1",
-                        title = "Display over other apps",
-                        description = "Required. Lets Subtitle Companion draw the subtitle layer on top of Netflix or another video app.",
-                        action = overlayPermissionButton,
-                    ), matchWrap(bottom = dp(9)))
+                    permissionDetailsContainer = LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(sectionDescription(
+                            "Complete these once so subtitles can appear over Netflix and playback can stay in sync."
+                        ), matchWrap(bottom = dp(12)))
 
-                    playbackPermissionButton = permissionActionButton("Enable") {
-                        startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-                    }
-                    addView(permissionRow(
-                        number = "2",
-                        title = "Playback sync access",
-                        description = "Recommended. Reads playback state exposed by supported video apps for automatic timing and study controls.",
-                        action = playbackPermissionButton,
-                    ), matchWrap(bottom = dp(9)))
+                        overlayPermissionButton = permissionActionButton("Grant") {
+                            openOverlaySettings()
+                        }
+                        addView(permissionRow(
+                            number = "1",
+                            title = "Display over other apps",
+                            description = "Required. Lets Subtitle Companion draw the subtitle layer on top of Netflix or another video app.",
+                            action = overlayPermissionButton,
+                        ), matchWrap(bottom = dp(9)))
 
-                    notificationPermissionButton = permissionActionButton("Allow") {
-                        requestOrManageNotificationPermission()
+                        playbackPermissionButton = permissionActionButton("Enable") {
+                            startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                        }
+                        addView(permissionRow(
+                            number = "2",
+                            title = "Playback sync access",
+                            description = "Recommended. Reads playback state exposed by supported video apps for automatic timing and study controls.",
+                            action = playbackPermissionButton,
+                        ), matchWrap(bottom = dp(9)))
+
+                        notificationPermissionButton = permissionActionButton("Allow") {
+                            requestOrManageNotificationPermission()
+                        }
+                        addView(permissionRow(
+                            number = "3",
+                            title = "App notifications",
+                            description = "Recommended. Keeps the overlay service visible and lets you restore a hidden control panel from the notification.",
+                            action = notificationPermissionButton,
+                        ), matchWrap())
                     }
-                    addView(permissionRow(
-                        number = "3",
-                        title = "App notifications",
-                        description = "Recommended. Keeps the overlay service visible and lets you restore a hidden control panel from the notification.",
-                        action = notificationPermissionButton,
-                    ), matchWrap())
+                    addView(permissionDetailsContainer, matchWrap())
                 }
                 addView(permissionCard, matchWrap(bottom = dp(12)))
 
@@ -289,7 +318,32 @@ class MainActivity : ComponentActivity() {
                     }
                     addView(selectedTrackLabel, matchWrap(bottom = dp(14)))
 
-                    addView(actionButton("Start subtitle overlay") { startSelectedOverlay() }, matchWrap(bottom = dp(9)))
+                    startOverlayButton = actionButton("Start subtitle overlay") { startSelectedOverlay() }
+                    addView(startOverlayButton, matchWrap(bottom = dp(7)))
+
+                    overlayLoadingRow = LinearLayout(context).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER
+                        visibility = View.GONE
+                        setPadding(dp(8), dp(4), dp(8), dp(10))
+
+                        addView(ProgressBar(context).apply {
+                            isIndeterminate = true
+                            indeterminateTintList = android.content.res.ColorStateList.valueOf(COLOR_PRIMARY)
+                        }, LinearLayout.LayoutParams(dp(22), dp(22)).apply {
+                            marginEnd = dp(9)
+                        })
+
+                        overlayLoadingLabel = TextView(context).apply {
+                            text = "Loading subtitle…"
+                            textSize = 12f
+                            typeface = Typeface.DEFAULT_BOLD
+                            setTextColor(COLOR_MUTED)
+                        }
+                        addView(overlayLoadingLabel)
+                    }
+                    addView(overlayLoadingRow, matchWrap())
+
                     addView(actionButton("Stop overlay", secondary = true) {
                         stopService(Intent(context, OverlayService::class.java))
                         Toast.makeText(context, "Subtitle overlay stopped.", Toast.LENGTH_SHORT).show()
@@ -501,6 +555,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startSelectedOverlay() {
+        if (overlayStartInProgress) return
+
         if (!Settings.canDrawOverlays(this)) {
             Toast.makeText(this, "Display over other apps is required before starting subtitles.", Toast.LENGTH_LONG).show()
             openOverlaySettings()
@@ -520,6 +576,7 @@ class MainActivity : ComponentActivity() {
             ).show()
         }
 
+        setOverlayLoading(true, "Securely loading subtitle from private storage…")
         setStatus("Loading the private subtitle…")
         executor.execute {
             val result = runCatching {
@@ -529,12 +586,14 @@ class MainActivity : ComponentActivity() {
             }
             runOnUiThread {
                 result.onSuccess { prepared ->
+                    setOverlayLoading(true, "Starting subtitle overlay…")
                     val intent = Intent(this, OverlayService::class.java).apply {
                         action = OverlayService.ACTION_START
                         putExtra(OverlayService.EXTRA_CUE_HANDOFF_TOKEN, prepared.token)
                     }
                     runCatching { ContextCompat.startForegroundService(this, intent) }
                         .onSuccess {
+                            setOverlayLoading(false)
                             setStatus("")
                             Toast.makeText(
                                 this,
@@ -545,9 +604,11 @@ class MainActivity : ComponentActivity() {
                         }
                         .onFailure { error ->
                             SubtitleCueHandoff.clear(prepared.token)
+                            setOverlayLoading(false)
                             setStatus(error.message ?: "Unable to start subtitle overlay.")
                         }
                 }.onFailure { error ->
+                    setOverlayLoading(false)
                     setStatus(error.message ?: "Unable to load this subtitle.")
                 }
             }
@@ -564,6 +625,7 @@ class MainActivity : ComponentActivity() {
         val overlayGranted = Settings.canDrawOverlays(this)
         val playbackGranted = hasNotificationAccess()
         val notificationsGranted = hasNotificationPermission()
+        val allPermissionsGranted = overlayGranted && playbackGranted && notificationsGranted
 
         stylePermissionButton(
             overlayPermissionButton,
@@ -599,15 +661,44 @@ class MainActivity : ComponentActivity() {
             !overlayGranted -> "Setup needed · Allow Display over other apps before starting subtitles."
             !playbackGranted -> "Overlay ready · Enable Playback sync access for automatic timing and study controls."
             !notificationsGranted -> "Almost ready · Allow app notifications so a hidden control panel can be restored easily."
-            else -> "Ready to watch · All recommended permissions are enabled."
+            else -> "✓ Ready · All recommended permissions are enabled."
         }
         permissionSummaryView.text = summary
-        permissionSummaryView.setTextColor(if (overlayGranted && playbackGranted && notificationsGranted) COLOR_SUCCESS else COLOR_TEXT)
+        permissionSummaryView.setTextColor(if (allPermissionsGranted) COLOR_SUCCESS else COLOR_TEXT)
         permissionSummaryView.background = roundedBackground(
-            if (overlayGranted && playbackGranted && notificationsGranted) COLOR_READY_FILL else COLOR_WARNING_FILL,
+            if (allPermissionsGranted) COLOR_READY_FILL else COLOR_WARNING_FILL,
             dp(10),
-            if (overlayGranted && playbackGranted && notificationsGranted) COLOR_READY_BORDER else COLOR_PRIMARY_DARK,
+            if (allPermissionsGranted) COLOR_READY_BORDER else COLOR_PRIMARY_DARK,
         )
+
+        if (allPermissionsGranted) {
+            setPermissionDetailsExpanded(false)
+        } else {
+            setPermissionDetailsExpanded(true)
+        }
+    }
+
+    private fun setPermissionDetailsExpanded(expanded: Boolean) {
+        if (!::permissionDetailsContainer.isInitialized || !::permissionToggleView.isInitialized) return
+        permissionDetailsContainer.visibility = if (expanded) View.VISIBLE else View.GONE
+        permissionToggleView.text = if (expanded) "Hide" else "Show"
+    }
+
+    private fun setOverlayLoading(loading: Boolean, message: String = "Loading subtitle…") {
+        overlayStartInProgress = loading
+        if (!::startOverlayButton.isInitialized) return
+
+        startOverlayButton.text = if (loading) "Loading subtitle…" else "Start subtitle overlay"
+        startOverlayButton.isClickable = !loading
+        startOverlayButton.isFocusable = !loading
+        startOverlayButton.alpha = if (loading) 0.65f else 1f
+
+        if (::overlayLoadingRow.isInitialized) {
+            overlayLoadingRow.visibility = if (loading) View.VISIBLE else View.GONE
+        }
+        if (::overlayLoadingLabel.isInitialized) {
+            overlayLoadingLabel.text = message
+        }
     }
 
     private fun stylePermissionButton(
