@@ -10,11 +10,15 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Base64
 
 internal object CustomerBackendConfig {
     const val SUPABASE_URL = "https://qtpxlrnazsonqdljafkd.supabase.co"
     const val SUPABASE_PUBLISHABLE_KEY = "sb_publishable_ZIlaAn2SOwncEW11LyzUHg_hI9Wzmtg"
     const val PORTAL_URL = "https://subtitle-project-978670366914.europe-west2.run.app/customer"
+    const val GOOGLE_OAUTH_REDIRECT_URL = "subtitlecompanion://auth-callback"
 }
 
 data class CustomerSession(
@@ -61,6 +65,59 @@ class CustomerSubtitleRepository(context: Context) {
         )
         ensureSuccess(response, "Unable to sign in")
         return parseAndSaveSession(JSONObject(response.body), fallbackEmail = normalizedEmail)
+    }
+
+    fun createGoogleSignInUrl(): String {
+        val verifier = randomBase64Url(32)
+        val challenge = sha256Base64Url(verifier)
+        preferences.edit {
+            putString(KEY_OAUTH_CODE_VERIFIER, verifier)
+            putLong(KEY_OAUTH_STARTED_AT, System.currentTimeMillis())
+        }
+
+        return buildString {
+            append("${CustomerBackendConfig.SUPABASE_URL}/auth/v1/authorize")
+            append("?provider=google")
+            append("&redirect_to=")
+            append(encodeQueryValue(CustomerBackendConfig.GOOGLE_OAUTH_REDIRECT_URL))
+            append("&code_challenge=")
+            append(encodeQueryValue(challenge))
+            append("&code_challenge_method=s256")
+        }
+    }
+
+    fun completeGoogleSignIn(authCode: String): CustomerSession {
+        require(authCode.isNotBlank()) { "Google sign-in did not return an authorization code." }
+        val verifier = preferences.getString(KEY_OAUTH_CODE_VERIFIER, null)
+            ?.takeIf(String::isNotBlank)
+            ?: error("Google sign-in has expired. Please try again.")
+        val startedAt = preferences.getLong(KEY_OAUTH_STARTED_AT, 0L)
+        if (startedAt <= 0L || System.currentTimeMillis() - startedAt > OAUTH_MAX_AGE_MS) {
+            clearPendingGoogleSignIn()
+            error("Google sign-in has expired. Please try again.")
+        }
+
+        return try {
+            val response = request(
+                method = "POST",
+                url = "${CustomerBackendConfig.SUPABASE_URL}/auth/v1/token?grant_type=pkce",
+                body = JSONObject()
+                    .put("auth_code", authCode)
+                    .put("code_verifier", verifier)
+                    .toString(),
+            )
+            ensureSuccess(response, "Unable to complete Google sign-in")
+            parseAndSaveSession(JSONObject(response.body), fallbackEmail = "")
+        } finally {
+            clearPendingGoogleSignIn()
+        }
+    }
+
+    fun clearPendingGoogleSignIn() {
+        preferences.edit {
+            remove(KEY_OAUTH_CODE_VERIFIER)
+            remove(KEY_OAUTH_STARTED_AT)
+        }
     }
 
     fun restoreSession(): CustomerSession? {
@@ -295,6 +352,18 @@ class CustomerSubtitleRepository(context: Context) {
 
     private fun encodePathSegment(value: String): String = encodeQueryValue(value)
 
+    private fun randomBase64Url(byteCount: Int): String {
+        val bytes = ByteArray(byteCount)
+        SecureRandom().nextBytes(bytes)
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+    }
+
+    private fun sha256Base64Url(value: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(StandardCharsets.US_ASCII))
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(digest)
+    }
+
     private data class HttpResponse(val status: Int, val body: String)
 
     private class SessionRejectedException(message: String) : IllegalStateException(message)
@@ -305,6 +374,9 @@ class CustomerSubtitleRepository(context: Context) {
         private const val KEY_REFRESH_TOKEN = "refresh_token"
         private const val KEY_EMAIL = "email"
         private const val KEY_EXPIRES_AT = "expires_at"
+        private const val KEY_OAUTH_CODE_VERIFIER = "google_oauth_code_verifier"
+        private const val KEY_OAUTH_STARTED_AT = "google_oauth_started_at"
+        private const val OAUTH_MAX_AGE_MS = 10 * 60 * 1000L
         private const val DEFAULT_EXPIRES_IN_SECONDS = 3600L
         private const val SESSION_REFRESH_MARGIN_SECONDS = 90L
         private const val CONNECT_TIMEOUT_MS = 10_000

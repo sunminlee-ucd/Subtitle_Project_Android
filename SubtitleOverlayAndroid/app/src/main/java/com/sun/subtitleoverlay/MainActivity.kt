@@ -41,6 +41,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var customerCard: LinearLayout
     private lateinit var emailInput: EditText
     private lateinit var passwordInput: EditText
+    private lateinit var googleSignInButton: TextView
     private lateinit var userEmailView: TextView
     private lateinit var permissionSummaryView: TextView
     private lateinit var overlayPermissionButton: TextView
@@ -75,7 +76,15 @@ class MainActivity : ComponentActivity() {
         window.navigationBarColor = COLOR_SURFACE
         setContentView(buildContent())
         requestNotificationPermissionIfNeeded()
-        restoreCustomerSession()
+        if (!handleGoogleOAuthCallback(intent)) {
+            restoreCustomerSession()
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleGoogleOAuthCallback(intent)
     }
 
     override fun onResume() {
@@ -142,7 +151,23 @@ class MainActivity : ComponentActivity() {
                 }
                 addView(passwordInput, matchWrap(bottom = dp(12)))
 
-                addView(actionButton("Sign in") { signIn() }, matchWrap())
+                addView(actionButton("Sign in") { signIn() }, matchWrap(bottom = dp(12)))
+
+                addView(TextView(context).apply {
+                    text = "OR"
+                    textSize = 10f
+                    typeface = Typeface.DEFAULT_BOLD
+                    gravity = Gravity.CENTER
+                    setTextColor(COLOR_MUTED)
+                }, matchWrap(bottom = dp(10)))
+
+                googleSignInButton = googleAuthButton {
+                    startGoogleSignIn()
+                }
+                addView(googleSignInButton, matchWrap(bottom = dp(9)))
+                addView(sectionDescription(
+                    "Use Google to sign in or create a Subtitle Companion customer account."
+                ), matchWrap())
             }
             addView(authCard, matchWrap(bottom = dp(16)))
 
@@ -404,6 +429,59 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    private fun startGoogleSignIn() {
+        val authorizationUrl = runCatching { repository.createGoogleSignInUrl() }
+            .getOrElse { error ->
+                setStatus(error.message ?: "Unable to start Google sign-in.")
+                return
+            }
+
+        setStatus("Continue with Google in your browser…")
+        val opened = runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW, authorizationUrl.toUri()))
+        }
+        if (opened.isFailure) {
+            repository.clearPendingGoogleSignIn()
+            setStatus(opened.exceptionOrNull()?.message ?: "Unable to open Google sign-in.")
+        }
+    }
+
+    private fun handleGoogleOAuthCallback(sourceIntent: Intent?): Boolean {
+        val data = sourceIntent?.data ?: return false
+        if (data.scheme != "subtitlecompanion" || data.host != "auth-callback") return false
+
+        val oauthError = data.getQueryParameter("error_description")
+            ?: data.getQueryParameter("error")
+        if (!oauthError.isNullOrBlank()) {
+            repository.clearPendingGoogleSignIn()
+            setStatus("Google sign-in failed: $oauthError")
+            return true
+        }
+
+        val code = data.getQueryParameter("code")
+        if (code.isNullOrBlank()) {
+            repository.clearPendingGoogleSignIn()
+            setStatus("Google sign-in did not return an authorization code.")
+            return true
+        }
+
+        setStatus("Finishing Google sign-in…")
+        executor.execute {
+            val result = runCatching { repository.completeGoogleSignIn(code) }
+            runOnUiThread {
+                result.onSuccess { session ->
+                    passwordInput.text.clear()
+                    setSignedIn(session)
+                    Toast.makeText(this, "Signed in with Google.", Toast.LENGTH_SHORT).show()
+                    loadTracks()
+                }.onFailure { error ->
+                    setStatus(error.message ?: "Unable to complete Google sign-in.")
+                }
+            }
+        }
+        return true
     }
 
     private fun signOut() {
@@ -850,6 +928,19 @@ class MainActivity : ComponentActivity() {
             dp(12),
             if (secondary) COLOR_BORDER else COLOR_PRIMARY,
         )
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { action() }
+    }
+
+    private fun googleAuthButton(action: () -> Unit) = TextView(this).apply {
+        text = "G   Continue with Google"
+        textSize = 15f
+        typeface = Typeface.DEFAULT_BOLD
+        gravity = Gravity.CENTER
+        setTextColor(0xFF202124.toInt())
+        setPadding(dp(16), dp(15), dp(16), dp(15))
+        background = roundedBackground(Color.WHITE, dp(12), 0xFFDADCE0.toInt())
         isClickable = true
         isFocusable = true
         setOnClickListener { action() }
