@@ -18,7 +18,7 @@ internal object CustomerBackendConfig {
     const val SUPABASE_URL = "https://qtpxlrnazsonqdljafkd.supabase.co"
     const val SUPABASE_PUBLISHABLE_KEY = "sb_publishable_ZIlaAn2SOwncEW11LyzUHg_hI9Wzmtg"
     const val PORTAL_URL = "https://subtitle-project-978670366914.europe-west2.run.app/customer"
-    const val GOOGLE_OAUTH_REDIRECT_URL = "subtitlecompanion://auth-callback"
+    const val GOOGLE_OAUTH_REDIRECT_URL = PORTAL_URL
 }
 
 data class CustomerSession(
