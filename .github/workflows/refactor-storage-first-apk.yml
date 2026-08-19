@@ -1,0 +1,413 @@
+name: Refactor Storage-first Android APK
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  refactor-verify-build:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply Storage-first refactor
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          root = Path('SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay')
+
+          def replace_once(text, old, new, label):
+              if old not in text:
+                  raise SystemExit(f'Anchor not found: {label}')
+              return text.replace(old, new, 1)
+
+          # CustomerSubtitleRepository: metadata-only listing and Storage-only content loading.
+          path = root / 'customer/CustomerSubtitleRepository.kt'
+          text = path.read_text()
+          text = text.replace('import kotlin.math.roundToLong\n', '')
+          text = replace_once(
+              text,
+              '''data class AuthorizedSubtitleTrack(\n    val id: String,\n    val title: String,\n    val episodeLabel: String,\n    val languageCode: String,\n    val languageName: String,\n    val cueCount: Int,\n) {''',
+              '''data class AuthorizedSubtitleTrack(\n    val id: String,\n    val title: String,\n    val episodeLabel: String,\n    val provider: String,\n    val languageCode: String,\n    val languageName: String,\n    val label: String,\n    val cueCount: Int,\n) {''',
+              'AuthorizedSubtitleTrack metadata fields',
+          )
+          text = replace_once(
+              text,
+              '        val select = "id,storage_path,cues"',
+              '        val select = "id,storage_path"',
+              'Storage-only track detail select',
+          )
+          text = replace_once(
+              text,
+              '''        val row = rows.getJSONObject(0)\n        val storagePath = row.optString("storage_path").takeIf { it.isNotBlank() && it != "null" }\n        val cues = if (storagePath != null) {\n            val srt = downloadStorageText(storagePath, session)\n            SrtParser.parse(srt)\n        } else {\n            parseCueArray(row.optJSONArray("cues") ?: JSONArray())\n        }\n        require(cues.isNotEmpty()) { "The selected subtitle contains no valid cues." }\n        return LoadedAuthorizedSubtitle(trackId = trackId, cues = cues)''',
+              '''        val row = rows.getJSONObject(0)\n        val storagePath = row.optString("storage_path")\n            .takeIf { it.isNotBlank() && it != "null" }\n            ?: error("This subtitle has not been migrated to private Storage yet. Please contact support.")\n        val srt = downloadStorageText(storagePath, session)\n        val cues = SrtParser.parse(srt)\n        require(cues.isNotEmpty()) { "The selected subtitle contains no valid cues." }\n        return LoadedAuthorizedSubtitle(trackId = trackId, cues = cues)''',
+              'remove legacy cues fallback',
+          )
+          text = replace_once(
+              text,
+              '''                        id = id,\n                        title = video?.optString("title")?.takeIf(String::isNotBlank) ?: "Untitled",\n                        episodeLabel = video?.optString("episode_label").orEmpty(),\n                        languageCode = row.optString("language_code"),\n                        languageName = row.optString("language_name").ifBlank { "Subtitle" },\n                        cueCount = row.optInt("cue_count", 0),''',
+              '''                        id = id,\n                        title = video?.optString("title")?.takeIf(String::isNotBlank) ?: "Untitled",\n                        episodeLabel = video?.optString("episode_label").orEmpty(),\n                        provider = video?.optString("provider").orEmpty(),\n                        languageCode = row.optString("language_code"),\n                        languageName = row.optString("language_name").ifBlank { "Subtitle" },\n                        label = row.optString("label"),\n                        cueCount = row.optInt("cue_count", 0),''',
+              'parse metadata fields',
+          )
+          start = text.find('    private fun parseCueArray(rows: JSONArray): List<SubtitleCue> {')
+          if start < 0:
+              raise SystemExit('Anchor not found: parseCueArray')
+          end = text.find('    private fun parseAndSaveSession(', start)
+          if end < 0:
+              raise SystemExit('Anchor not found: parseAndSaveSession after parseCueArray')
+          text = text[:start] + text[end:]
+          path.write_text(text)
+
+          # MainActivity: no SRT files or FileProvider; parsed cues go to process-local handoff.
+          path = root / 'MainActivity.kt'
+          text = path.read_text()
+          for imp in [
+              'import androidx.core.content.FileProvider\n',
+              'import androidx.core.content.edit\n',
+              'import com.sun.subtitleoverlay.subtitle.SrtParser\n',
+              'import java.io.File\n',
+          ]:
+              text = text.replace(imp, '')
+          text = replace_once(
+              text,
+              'import com.sun.subtitleoverlay.overlay.OverlayService\n',
+              'import com.sun.subtitleoverlay.overlay.OverlayService\nimport com.sun.subtitleoverlay.subtitle.SubtitleCueHandoff\n',
+              'SubtitleCueHandoff import',
+          )
+          text = text.replace('    private val preferences by lazy { getSharedPreferences(PREFS_NAME, MODE_PRIVATE) }\n\n', '')
+          text = text.replace('        File(cacheDir, AUTHORIZED_CACHE_FILENAME).delete()\n        preferences.edit { remove(KEY_LAST_SRT_URI) }\n', '')
+          text = replace_once(
+              text,
+              '''            repository.signOut()\n            File(cacheDir, AUTHORIZED_CACHE_FILENAME).delete()''',
+              '''            repository.signOut()\n            SubtitleCueHandoff.clear()''',
+              'clear in-memory cues on sign out',
+          )
+          text = replace_once(
+              text,
+              '''                    track.languageCode,\n                    track.languageName,\n                    track.displayTitle,''',
+              '''                    track.languageCode,\n                    track.languageName,\n                    track.label,\n                    track.provider,\n                    track.displayTitle,''',
+              'search provider and label',
+          )
+          text = replace_once(
+              text,
+              '''                    append(track.languageName)\n                    if (track.languageCode.isNotBlank()) append(" · ${track.languageCode.uppercase()}")\n                    if (track.cueCount > 0) append(" · ${track.cueCount} cues")''',
+              '''                    append(track.languageName)\n                    if (track.languageCode.isNotBlank()) append(" · ${track.languageCode.uppercase()}")\n                    if (track.label.isNotBlank() && !track.label.equals("Default", ignoreCase = true)) append(" · ${track.label}")\n                    if (track.provider.isNotBlank()) append(" · ${track.provider}")\n                    if (track.cueCount > 0) append(" · ${track.cueCount} cues")''',
+              'render metadata details',
+          )
+          old_start = '''        setStatus("Loading the private subtitle…")\n        executor.execute {\n            val result = runCatching {\n                val loaded = repository.loadAuthorizedSubtitle(track.id)\n                val file = File(cacheDir, AUTHORIZED_CACHE_FILENAME)\n                file.writeText(SrtParser.render(loaded.cues), Charsets.UTF_8)\n                PreparedSubtitle(file, track.displayLabel, loaded.cues.size)\n            }\n            runOnUiThread {\n                result.onSuccess { prepared ->\n                    val contentUri = FileProvider.getUriForFile(\n                        this,\n                        "$packageName.privatefiles",\n                        prepared.file,\n                    )\n                    val intent = Intent(this, OverlayService::class.java).apply {\n                        action = OverlayService.ACTION_START\n                        data = contentUri\n                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)\n                    }\n                    ContextCompat.startForegroundService(this, intent)\n                    window.decorView.postDelayed({ prepared.file.delete() }, CACHE_DELETE_DELAY_MS)\n                    setStatus("")\n                    Toast.makeText(\n                        this,\n                        "${prepared.cueCount} cues ready · ${prepared.label}",\n                        Toast.LENGTH_SHORT,\n                    ).show()\n                    moveTaskToBack(true)\n                }.onFailure { error ->\n                    File(cacheDir, AUTHORIZED_CACHE_FILENAME).delete()\n                    setStatus(error.message ?: "Unable to load this subtitle.")\n                }\n            }\n        }'''
+          new_start = '''        setStatus("Loading the private subtitle…")\n        executor.execute {\n            val result = runCatching {\n                val loaded = repository.loadAuthorizedSubtitle(track.id)\n                val token = SubtitleCueHandoff.prepare(loaded.cues)\n                PreparedSubtitle(token, track.displayLabel, loaded.cues.size)\n            }\n            runOnUiThread {\n                result.onSuccess { prepared ->\n                    val intent = Intent(this, OverlayService::class.java).apply {\n                        action = OverlayService.ACTION_START\n                        putExtra(OverlayService.EXTRA_CUE_HANDOFF_TOKEN, prepared.token)\n                    }\n                    runCatching { ContextCompat.startForegroundService(this, intent) }\n                        .onSuccess {\n                            setStatus("")\n                            Toast.makeText(\n                                this,\n                                "${prepared.cueCount} cues ready · ${prepared.label}",\n                                Toast.LENGTH_SHORT,\n                            ).show()\n                            moveTaskToBack(true)\n                        }\n                        .onFailure { error ->\n                            SubtitleCueHandoff.clear(prepared.token)\n                            setStatus(error.message ?: "Unable to start subtitle overlay.")\n                        }\n                }.onFailure { error ->\n                    setStatus(error.message ?: "Unable to load this subtitle.")\n                }\n            }\n        }'''
+          text = replace_once(text, old_start, new_start, 'MainActivity Storage-first start flow')
+          text = replace_once(
+              text,
+              '''    private data class PreparedSubtitle(\n        val file: File,\n        val label: String,\n        val cueCount: Int,\n    )''',
+              '''    private data class PreparedSubtitle(\n        val token: String,\n        val label: String,\n        val cueCount: Int,\n    )''',
+              'PreparedSubtitle token payload',
+          )
+          text = text.replace('        const val KEY_LAST_SRT_URI = "last_srt_uri"\n', '')
+          text = text.replace('        private const val AUTHORIZED_CACHE_FILENAME = "authorized-subtitle.srt"\n', '')
+          text = text.replace('        private const val CACHE_DELETE_DELAY_MS = 5_000L\n', '')
+          path.write_text(text)
+
+          # OverlayService: consume only parsed List<SubtitleCue> from in-memory handoff.
+          path = root / 'overlay/OverlayService.kt'
+          text = path.read_text()
+          for imp in [
+              'import android.provider.OpenableColumns\n',
+              'import androidx.core.net.toUri\n',
+              'import com.sun.subtitleoverlay.subtitle.SrtParser\n',
+              'import java.security.MessageDigest\n',
+          ]:
+              text = text.replace(imp, '')
+          text = replace_once(
+              text,
+              'import com.sun.subtitleoverlay.subtitle.SubtitleCue\n',
+              'import com.sun.subtitleoverlay.subtitle.SubtitleCue\nimport com.sun.subtitleoverlay.subtitle.SubtitleCueHandoff\n',
+              'OverlayService handoff import',
+          )
+          text = replace_once(
+              text,
+              '    private var cues: List<SubtitleCue> = emptyList()\n    private var subtitleListId = ""',
+              '    private var cues: List<SubtitleCue> = emptyList()\n    private var activeCueToken = ""\n    private var subtitleListId = ""',
+              'active cue token field',
+          )
+          old_block = '''        val uri = intent?.data ?: getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE)\n            .getString(MainActivity.KEY_LAST_SRT_URI, null)\n            ?.toUri()\n        if (uri == null) {\n            Toast.makeText(this, "Choose an SRT file first.", Toast.LENGTH_LONG).show()\n            stopSelf()\n            return START_NOT_STICKY\n        }\n\n        startForeground(NOTIFICATION_ID, buildNotification())\n        return runCatching {\n            val text = contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }\n                ?: error("The SRT file cannot be opened.")\n            val parsedCues = SrtParser.parse(text)\n            require(parsedCues.isNotEmpty()) { "No valid subtitle cues were found." }\n\n            stopStudyRepeat(pause = false, userInitiated = false)\n            cues = parsedCues\n            subtitleListId = subtitleFingerprint(queryDisplayName(uri), text)\n            studyPlaybackEngine = StudyPlaybackEngine(cues)\n            restoreStudySelection()\n\n            showWindows()\n            resetPlayback()\n            stopSessionMonitoring()\n            startSessionMonitoring()\n            START_STICKY\n        }.getOrElse { error ->\n            Toast.makeText(this, "Unable to open SRT: ${error.message}", Toast.LENGTH_LONG).show()\n            stopSelf()\n            START_NOT_STICKY\n        }'''
+          new_block = '''        val token = intent?.getStringExtra(EXTRA_CUE_HANDOFF_TOKEN).orEmpty()\n        val snapshot = SubtitleCueHandoff.get(token)\n        if (snapshot == null) {\n            Toast.makeText(\n                this,\n                "Subtitle data is no longer available in memory. Return to the app and start the overlay again.",\n                Toast.LENGTH_LONG,\n            ).show()\n            stopSelf()\n            return START_NOT_STICKY\n        }\n\n        startForeground(NOTIFICATION_ID, buildNotification())\n        return runCatching {\n            require(snapshot.cues.isNotEmpty()) { "No valid subtitle cues were found." }\n\n            stopStudyRepeat(pause = false, userInitiated = false)\n            cues = snapshot.cues\n            activeCueToken = token\n            subtitleListId = snapshot.listId\n            studyPlaybackEngine = StudyPlaybackEngine(cues)\n            restoreStudySelection()\n\n            showWindows()\n            resetPlayback()\n            stopSessionMonitoring()\n            startSessionMonitoring()\n            START_STICKY\n        }.getOrElse { error ->\n            SubtitleCueHandoff.clear(token)\n            Toast.makeText(this, "Unable to load subtitles: ${error.message}", Toast.LENGTH_LONG).show()\n            stopSelf()\n            START_NOT_STICKY\n        }'''
+          text = replace_once(text, old_block, new_block, 'OverlayService in-memory cue loading')
+          text = replace_once(
+              text,
+              '''        subtitleView = null\n        controllerView = null\n        super.onDestroy()''',
+              '''        subtitleView = null\n        controllerView = null\n        if (activeCueToken.isNotBlank()) SubtitleCueHandoff.clear(activeCueToken)\n        activeCueToken = ""\n        super.onDestroy()''',
+              'clear handoff on service destroy',
+          )
+          start = text.find('    private fun subtitleFingerprint(filename: String, content: String): String {')
+          if start < 0:
+              raise SystemExit('Anchor not found: subtitleFingerprint')
+          end = text.find('    private fun manualPositionMs(): Long {', start)
+          if end < 0:
+              raise SystemExit('Anchor not found: manualPositionMs after URI helpers')
+          text = text[:start] + text[end:]
+          text = replace_once(
+              text,
+              '        const val ACTION_HIDE_CONTROLS = "com.sun.subtitleoverlay.action.HIDE_CONTROLS"\n',
+              '        const val ACTION_HIDE_CONTROLS = "com.sun.subtitleoverlay.action.HIDE_CONTROLS"\n        const val EXTRA_CUE_HANDOFF_TOKEN = "cue_handoff_token"\n',
+              'cue handoff intent key',
+          )
+          path.write_text(text)
+
+          # StudySavedCuesActivity: reuse active in-memory parsed cues, never reopen an SRT URI.
+          path = root / 'study/StudySavedCuesActivity.kt'
+          text = path.read_text()
+          for imp in [
+              'import android.net.Uri\n',
+              'import android.provider.OpenableColumns\n',
+              'import androidx.core.net.toUri\n',
+              'import com.sun.subtitleoverlay.subtitle.SrtParser\n',
+              'import java.security.MessageDigest\n',
+          ]:
+              text = text.replace(imp, '')
+          text = replace_once(
+              text,
+              'import com.sun.subtitleoverlay.subtitle.SubtitleCue\n',
+              'import com.sun.subtitleoverlay.subtitle.SubtitleCue\nimport com.sun.subtitleoverlay.subtitle.SubtitleCueHandoff\n',
+              'Study handoff import',
+          )
+          old_load = '''        runCatching {\n            val preferences = getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE)\n            val uri = preferences.getString(MainActivity.KEY_LAST_SRT_URI, null)?.toUri()\n                ?: error("No SRT file is currently loaded.")\n            val filename = queryDisplayName(uri)\n            val content = contentResolver.openInputStream(uri)\n                ?.bufferedReader(Charsets.UTF_8)\n                ?.use { it.readText() }\n                ?: error("The selected SRT file cannot be opened.")\n\n            cues = SrtParser.parse(content)\n            val subtitleListId = subtitleFingerprint(filename, content)\n            val stored = preferences.getString("$SELECTION_KEY_PREFIX$subtitleListId", "").orEmpty()'''
+          new_load = '''        runCatching {\n            val preferences = getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE)\n            val snapshot = SubtitleCueHandoff.current()\n                ?: error("No subtitle is currently loaded in the overlay.")\n\n            cues = snapshot.cues\n            val stored = preferences.getString("$SELECTION_KEY_PREFIX${snapshot.listId}", "").orEmpty()'''
+          text = replace_once(text, old_load, new_load, 'StudySavedCues in-memory load')
+          start = text.find('    private fun queryDisplayName(uri: Uri): String {')
+          if start < 0:
+              raise SystemExit('Anchor not found: Study queryDisplayName')
+          end = text.find('    private fun formatTime(ms: Long): String {', start)
+          if end < 0:
+              raise SystemExit('Anchor not found: Study formatTime after URI helpers')
+          text = text[:start] + text[end:]
+          path.write_text(text)
+
+          # Manifest: remove now-unused FileProvider surface.
+          path = Path('SubtitleOverlayAndroid/app/src/main/AndroidManifest.xml')
+          text = path.read_text()
+          provider = '''        <provider\n            android:name="androidx.core.content.FileProvider"\n            android:authorities="${applicationId}.privatefiles"\n            android:exported="false"\n            android:grantUriPermissions="true">\n            <meta-data\n                android:name="android.support.FILE_PROVIDER_PATHS"\n                android:resource="@xml/private_file_paths" />\n        </provider>\n\n'''
+          text = replace_once(text, provider, '', 'remove FileProvider')
+          path.write_text(text)
+          PY
+
+          cat > SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/subtitle/SubtitleCueHandoff.kt <<'EOF'
+          package com.sun.subtitleoverlay.subtitle
+
+          import java.security.MessageDigest
+          import java.util.UUID
+
+          data class SubtitleCueSnapshot(
+              val token: String,
+              val listId: String,
+              val cues: List<SubtitleCue>,
+          )
+
+          object SubtitleCueHandoff {
+              private var active: SubtitleCueSnapshot? = null
+
+              @Synchronized
+              fun prepare(cues: List<SubtitleCue>): String {
+                  require(cues.isNotEmpty()) { "No subtitle cues are available." }
+                  val copiedCues = cues.toList()
+                  val token = UUID.randomUUID().toString()
+                  active = SubtitleCueSnapshot(
+                      token = token,
+                      listId = fingerprint(copiedCues),
+                      cues = copiedCues,
+                  )
+                  return token
+              }
+
+              @Synchronized
+              fun get(token: String): SubtitleCueSnapshot? =
+                  active?.takeIf { token.isNotBlank() && it.token == token }
+
+              @Synchronized
+              fun current(): SubtitleCueSnapshot? = active
+
+              @Synchronized
+              fun clear(token: String? = null) {
+                  if (token == null || active?.token == token) active = null
+              }
+
+              private fun fingerprint(cues: List<SubtitleCue>): String {
+                  val canonical = buildString {
+                      for (cue in cues) {
+                          append(cue.startMs)
+                          append('\u0001')
+                          append(cue.endMs)
+                          append('\u0001')
+                          append(cue.text)
+                          append('\u0002')
+                      }
+                  }
+                  val digest = MessageDigest.getInstance("SHA-256")
+                      .digest(canonical.toByteArray(Charsets.UTF_8))
+                  return digest.take(12).joinToString("") { byte ->
+                      "%02x".format(byte.toInt() and 0xff)
+                  }
+              }
+          }
+          EOF
+
+          cat > SubtitleOverlayAndroid/app/src/test/java/com/sun/subtitleoverlay/subtitle/SubtitleCueHandoffTest.kt <<'EOF'
+          package com.sun.subtitleoverlay.subtitle
+
+          import org.junit.After
+          import org.junit.Assert.assertEquals
+          import org.junit.Assert.assertNotEquals
+          import org.junit.Assert.assertNotNull
+          import org.junit.Assert.assertNull
+          import org.junit.Before
+          import org.junit.Test
+
+          class SubtitleCueHandoffTest {
+              private val cues = listOf(
+                  SubtitleCue(1_000L, 2_000L, "Hello"),
+                  SubtitleCue(2_500L, 3_200L, "World"),
+              )
+
+              @Before
+              fun setUp() = SubtitleCueHandoff.clear()
+
+              @After
+              fun tearDown() = SubtitleCueHandoff.clear()
+
+              @Test
+              fun preparedCuesAreAvailableOnlyForMatchingToken() {
+                  val token = SubtitleCueHandoff.prepare(cues)
+                  assertEquals(cues, SubtitleCueHandoff.get(token)?.cues)
+                  assertNull(SubtitleCueHandoff.get("wrong-token"))
+              }
+
+              @Test
+              fun sameCueContentKeepsStableStudyListIdAcrossPreparations() {
+                  val first = SubtitleCueHandoff.prepare(cues)
+                  val firstSnapshot = assertNotNull(SubtitleCueHandoff.get(first)).let {
+                      SubtitleCueHandoff.get(first)!!
+                  }
+                  val second = SubtitleCueHandoff.prepare(cues)
+                  val secondSnapshot = SubtitleCueHandoff.get(second)!!
+                  assertNotEquals(firstSnapshot.token, secondSnapshot.token)
+                  assertEquals(firstSnapshot.listId, secondSnapshot.listId)
+              }
+
+              @Test
+              fun clearingOldTokenDoesNotClearNewActiveSubtitle() {
+                  val oldToken = SubtitleCueHandoff.prepare(cues)
+                  val newToken = SubtitleCueHandoff.prepare(cues + SubtitleCue(4_000L, 5_000L, "Again"))
+                  SubtitleCueHandoff.clear(oldToken)
+                  assertNotNull(SubtitleCueHandoff.get(newToken))
+              }
+          }
+          EOF
+
+          rm -f SubtitleOverlayAndroid/app/src/main/res/xml/private_file_paths.xml
+
+      - name: Verify Storage-first contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          repo = Path('SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/customer/CustomerSubtitleRepository.kt').read_text()
+          main = Path('SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/MainActivity.kt').read_text()
+          overlay = Path('SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/overlay/OverlayService.kt').read_text()
+          study = Path('SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/study/StudySavedCuesActivity.kt').read_text()
+          manifest = Path('SubtitleOverlayAndroid/app/src/main/AndroidManifest.xml').read_text()
+          handoff = Path('SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/subtitle/SubtitleCueHandoff.kt').read_text()
+
+          required = [
+              ('metadata list', 'id,language_code,language_name,label,cue_count,video:videos(title,episode_label,provider)' in repo),
+              ('detail id+storage only', 'val select = "id,storage_path"' in repo),
+              ('authenticated storage path', '/storage/v1/object/authenticated/subtitle-files/' in repo),
+              ('JWT Authorization', 'Authorization", "Bearer $accessToken' in repo),
+              ('memory parser', 'SrtParser.parse(srt)' in repo),
+              ('cue handoff', 'SubtitleCueHandoff.prepare(loaded.cues)' in main and 'SubtitleCueHandoff.get(token)' in overlay),
+              ('study memory reuse', 'SubtitleCueHandoff.current()' in study),
+          ]
+          failed = [name for name, ok in required if not ok]
+          if failed:
+              raise SystemExit('Missing Storage-first contract: ' + ', '.join(failed))
+
+          forbidden = {
+              'legacy cues select': 'storage_path,cues' in repo,
+              'legacy cues parser': 'parseCueArray' in repo,
+              'SRT cache file': 'AUTHORIZED_CACHE_FILENAME' in main,
+              'FileProvider in MainActivity': 'FileProvider' in main,
+              'SRT render-to-file': 'SrtParser.render' in main,
+              'Overlay URI reader': 'contentResolver.openInputStream' in overlay,
+              'Overlay SRT parser': 'SrtParser.parse' in overlay,
+              'Study URI reader': 'contentResolver.openInputStream' in study,
+              'FileProvider manifest': 'androidx.core.content.FileProvider' in manifest,
+          }
+          bad = [name for name, present in forbidden.items() if present]
+          if bad:
+              raise SystemExit('Forbidden legacy path remains: ' + ', '.join(bad))
+
+          public_actions = ['Download SRT', 'Save As', 'Export SRT', 'Share SRT']
+          app_source = '\n'.join(p.read_text(errors='ignore') for p in Path('SubtitleOverlayAndroid/app/src/main').rglob('*') if p.is_file())
+          hits = [term for term in public_actions if term.lower() in app_source.lower()]
+          if hits:
+              raise SystemExit('Forbidden customer export surface found: ' + ', '.join(hits))
+
+          print('Storage-first Android contract verified.')
+          PY
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36"
+
+      - name: Unit tests
+        working-directory: SubtitleOverlayAndroid
+        run: |
+          chmod +x gradlew
+          ./gradlew test --stacktrace
+
+      - name: Lint
+        working-directory: SubtitleOverlayAndroid
+        run: ./gradlew lint --stacktrace
+
+      - name: Build debug APK
+        working-directory: SubtitleOverlayAndroid
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Verify APK signature
+        working-directory: SubtitleOverlayAndroid
+        run: |
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          "$APKSIGNER" verify --verbose --print-certs app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Commit refactor and latest APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A SubtitleOverlayAndroid/app/src/main SubtitleOverlayAndroid/app/src/test
+          git add -f SubtitleOverlayAndroid/app/build/outputs/apk/debug/app-debug.apk
+          git commit -m "Use Storage-first subtitle loading on Android"
+          git push origin HEAD:master
