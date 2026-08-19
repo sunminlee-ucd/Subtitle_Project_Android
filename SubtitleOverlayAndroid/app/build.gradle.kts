@@ -63,6 +63,29 @@ android {
     }
 }
 
+val renameDebugApk by tasks.registering {
+    doLast {
+        val outputDirectory = layout.buildDirectory.dir("outputs/apk/debug").get().asFile
+        val defaultApk = outputDirectory.resolve("app-debug.apk")
+        val companionApk = outputDirectory.resolve("subtitle-companion.apk")
+
+        if (!defaultApk.exists()) {
+            throw GradleException("Expected debug APK was not generated: ${defaultApk.absolutePath}")
+        }
+
+        if (companionApk.exists() && !companionApk.delete()) {
+            throw GradleException("Unable to replace existing APK: ${companionApk.absolutePath}")
+        }
+        if (!defaultApk.renameTo(companionApk)) {
+            throw GradleException("Unable to rename debug APK to ${companionApk.name}")
+        }
+    }
+}
+
+tasks.named("assembleDebug") {
+    finalizedBy(renameDebugApk)
+}
+
 dependencies {
     implementation("androidx.activity:activity-ktx:1.13.0")
     implementation("androidx.core:core-ktx:1.18.0")
