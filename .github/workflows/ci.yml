@@ -40,19 +40,6 @@ jobs:
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew
 
-      - name: Sync Google auth with customer portal
-        working-directory: .
-        run: python .github/scripts/sync_android_google_auth.py
-
-      - name: Verify Google auth sync contract
-        working-directory: .
-        run: |
-          grep -q '/auth/v1/settings' SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/customer/CustomerSubtitleRepository.kt
-          grep -q 'Google sign-in is not enabled in Supabase yet.' SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/customer/CustomerSubtitleRepository.kt
-          grep -q '/auth/v1/user' SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/customer/CustomerSubtitleRepository.kt
-          grep -q 'R.drawable.google_g_logo' SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/MainActivity.kt
-          test -f SubtitleOverlayAndroid/app/src/main/res/drawable/google_g_logo.xml
-
       - name: Unit tests
         run: ./gradlew test --stacktrace
 
@@ -75,7 +62,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish synced Google auth Android build
+      - name: Publish APK to dedicated folder
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         working-directory: .
         run: |
@@ -83,13 +70,10 @@ jobs:
           cp SubtitleOverlayAndroid/app/build/outputs/apk/debug/subtitle-companion.apk APK/subtitle-companion.apk
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/MainActivity.kt
-          git add SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/customer/CustomerSubtitleRepository.kt
-          git add SubtitleOverlayAndroid/app/src/main/res/drawable/google_g_logo.xml
           git add -f APK/subtitle-companion.apk
           if git diff --cached --quiet; then
-            echo "Synced Google auth Android build is already up to date."
+            echo "APK is already up to date."
             exit 0
           fi
-          git commit -m "Sync Android Google login with customer portal"
+          git commit -m "Update subtitle-companion APK"
           git push origin HEAD:master
