@@ -110,3 +110,5 @@ Pull Request와 `master` push에서 `.github/workflows/ci.yml`이 다음을 검�
 - Android 12 이상에서는 대상 앱의 보안 정책에 따라 제3자 오버레이가 제한될 수 있습니다.
 - 제조사별 절전 정책이 Foreground Service에 영향을 줄 수 있습니다.
 - 앱에서 다운로드 UI를 제거해도, 자막을 렌더링하는 클라이언트가 평문을 전혀 보지 않게 만드는 것은 불가능합니다.
+
+<!-- google-oauth-ci-verification -->
