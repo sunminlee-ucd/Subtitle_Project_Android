@@ -46,3 +46,16 @@ jobs:
 
       - name: Build debug APK
         run: ./gradlew assembleDebug --stacktrace
+
+      - name: Verify APK filename
+        run: |
+          test -f app/build/outputs/apk/debug/subtitle-companion.apk
+          test ! -f app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload subtitle-companion APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: subtitle-companion-debug
+          path: SubtitleOverlayAndroid/app/build/outputs/apk/debug/subtitle-companion.apk
+          if-no-files-found: error
+          retention-days: 30
