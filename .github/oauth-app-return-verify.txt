@@ -1,0 +1,1 @@
+verify Android OAuth returns to Subtitle Companion app
