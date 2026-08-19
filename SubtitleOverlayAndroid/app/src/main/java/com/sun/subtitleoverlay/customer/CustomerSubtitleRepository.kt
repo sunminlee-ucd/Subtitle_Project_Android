@@ -68,6 +68,19 @@ class CustomerSubtitleRepository(context: Context) {
     }
 
     fun createGoogleSignInUrl(): String {
+        val settingsResponse = request(
+            method = "GET",
+            url = "${CustomerBackendConfig.SUPABASE_URL}/auth/v1/settings",
+        )
+        ensureSuccess(settingsResponse, "Unable to check Google sign-in")
+        val googleEnabled = JSONObject(settingsResponse.body)
+            .optJSONObject("external")
+            ?.optBoolean("google", false)
+            ?: false
+        if (!googleEnabled) {
+            error("Google sign-in is not enabled in Supabase yet.")
+        }
+
         val verifier = randomBase64Url(32)
         val challenge = sha256Base64Url(verifier)
         preferences.edit {
@@ -107,7 +120,20 @@ class CustomerSubtitleRepository(context: Context) {
                     .toString(),
             )
             ensureSuccess(response, "Unable to complete Google sign-in")
-            parseAndSaveSession(JSONObject(response.body), fallbackEmail = "")
+            val session = parseAndSaveSession(JSONObject(response.body), fallbackEmail = "")
+
+            // Match the customer portal: verify the signed-in Supabase user after OAuth
+            // before treating the callback as a completed customer session.
+            val userResponse = request(
+                method = "GET",
+                url = "${CustomerBackendConfig.SUPABASE_URL}/auth/v1/user",
+                accessToken = session.accessToken,
+            )
+            ensureSuccess(userResponse, "Unable to verify your Google account")
+            val verifiedEmail = JSONObject(userResponse.body)
+                .optString("email")
+                .ifBlank { session.email }
+            saveSession(session.copy(email = verifiedEmail))
         } finally {
             clearPendingGoogleSignIn()
         }
@@ -275,6 +301,10 @@ class CustomerSubtitleRepository(context: Context) {
             email = email,
             expiresAtEpochSeconds = System.currentTimeMillis() / 1000L + expiresIn,
         )
+        return saveSession(session)
+    }
+
+    private fun saveSession(session: CustomerSession): CustomerSession {
         preferences.edit {
             putString(KEY_ACCESS_TOKEN, session.accessToken)
             putString(KEY_REFRESH_TOKEN, session.refreshToken)

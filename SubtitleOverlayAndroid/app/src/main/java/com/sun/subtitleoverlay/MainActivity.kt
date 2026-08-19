@@ -17,6 +17,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
@@ -41,7 +42,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var customerCard: LinearLayout
     private lateinit var emailInput: EditText
     private lateinit var passwordInput: EditText
-    private lateinit var googleSignInButton: TextView
+    private lateinit var googleSignInButton: LinearLayout
     private lateinit var userEmailView: TextView
     private lateinit var permissionSummaryView: TextView
     private lateinit var overlayPermissionButton: TextView
@@ -432,19 +433,28 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startGoogleSignIn() {
-        val authorizationUrl = runCatching { repository.createGoogleSignInUrl() }
-            .getOrElse { error ->
-                setStatus(error.message ?: "Unable to start Google sign-in.")
-                return
-            }
+        if (::googleSignInButton.isInitialized && !googleSignInButton.isEnabled) return
+        setGoogleSignInBusy(true)
+        setStatus("Checking Google sign-in…")
 
-        setStatus("Continue with Google in your browser…")
-        val opened = runCatching {
-            startActivity(Intent(Intent.ACTION_VIEW, authorizationUrl.toUri()))
-        }
-        if (opened.isFailure) {
-            repository.clearPendingGoogleSignIn()
-            setStatus(opened.exceptionOrNull()?.message ?: "Unable to open Google sign-in.")
+        executor.execute {
+            val result = runCatching { repository.createGoogleSignInUrl() }
+            runOnUiThread {
+                result.onSuccess { authorizationUrl ->
+                    setStatus("Opening Google sign-in…")
+                    val opened = runCatching {
+                        startActivity(Intent(Intent.ACTION_VIEW, authorizationUrl.toUri()))
+                    }
+                    setGoogleSignInBusy(false)
+                    if (opened.isFailure) {
+                        repository.clearPendingGoogleSignIn()
+                        setStatus(opened.exceptionOrNull()?.message ?: "Unable to open Google sign-in.")
+                    }
+                }.onFailure { error ->
+                    setGoogleSignInBusy(false)
+                    setStatus(error.message ?: "Unable to start Google sign-in.")
+                }
+            }
         }
     }
 
@@ -933,17 +943,40 @@ class MainActivity : ComponentActivity() {
         setOnClickListener { action() }
     }
 
-    private fun googleAuthButton(action: () -> Unit) = TextView(this).apply {
-        text = "G   Continue with Google"
-        textSize = 15f
-        typeface = Typeface.DEFAULT_BOLD
+    private fun googleAuthButton(action: () -> Unit) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER
-        setTextColor(0xFF202124.toInt())
-        setPadding(dp(16), dp(15), dp(16), dp(15))
+        minimumHeight = dp(48)
+        setPadding(dp(16), dp(13), dp(16), dp(13))
         background = roundedBackground(Color.WHITE, dp(12), 0xFFDADCE0.toInt())
         isClickable = true
         isFocusable = true
+        contentDescription = "Continue with Google"
+
+        addView(ImageView(context).apply {
+            setImageResource(R.drawable.google_g_logo)
+            contentDescription = null
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+        }, LinearLayout.LayoutParams(dp(18), dp(18)).apply {
+            marginEnd = dp(10)
+        })
+
+        addView(TextView(context).apply {
+            text = "Continue with Google"
+            textSize = 15f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(0xFF202124.toInt())
+            gravity = Gravity.CENTER_VERTICAL
+        })
+
         setOnClickListener { action() }
+    }
+
+    private fun setGoogleSignInBusy(busy: Boolean) {
+        if (!::googleSignInButton.isInitialized) return
+        googleSignInButton.isEnabled = !busy
+        googleSignInButton.isClickable = !busy
+        googleSignInButton.alpha = if (busy) 0.65f else 1f
     }
 
     private fun compactButton(label: String, action: () -> Unit) = TextView(this).apply {
