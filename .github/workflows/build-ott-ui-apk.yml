@@ -61,3 +61,5 @@ jobs:
             git commit -m "Update APK with OTT subtitle library UI"
             git push origin HEAD:master
           fi
+
+# Manual trigger marker: OTT library UI verification.
