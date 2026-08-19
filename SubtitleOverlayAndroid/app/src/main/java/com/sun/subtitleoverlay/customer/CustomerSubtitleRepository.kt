@@ -10,7 +10,6 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
-import kotlin.math.roundToLong
 
 internal object CustomerBackendConfig {
     const val SUPABASE_URL = "https://qtpxlrnazsonqdljafkd.supabase.co"
@@ -29,8 +28,10 @@ data class AuthorizedSubtitleTrack(
     val id: String,
     val title: String,
     val episodeLabel: String,
+    val provider: String,
     val languageCode: String,
     val languageName: String,
+    val label: String,
     val cueCount: Int,
 ) {
     val displayTitle: String
@@ -104,7 +105,7 @@ class CustomerSubtitleRepository(context: Context) {
     fun loadAuthorizedSubtitle(trackId: String): LoadedAuthorizedSubtitle {
         require(trackId.isNotBlank()) { "Choose a subtitle first." }
         val session = requireSession()
-        val select = "id,storage_path,cues"
+        val select = "id,storage_path"
         val url = buildString {
             append("${CustomerBackendConfig.SUPABASE_URL}/rest/v1/subtitle_tracks")
             append("?select=")
@@ -121,13 +122,11 @@ class CustomerSubtitleRepository(context: Context) {
         }
 
         val row = rows.getJSONObject(0)
-        val storagePath = row.optString("storage_path").takeIf { it.isNotBlank() && it != "null" }
-        val cues = if (storagePath != null) {
-            val srt = downloadStorageText(storagePath, session)
-            SrtParser.parse(srt)
-        } else {
-            parseCueArray(row.optJSONArray("cues") ?: JSONArray())
-        }
+        val storagePath = row.optString("storage_path")
+            .takeIf { it.isNotBlank() && it != "null" }
+            ?: error("This subtitle has not been migrated to private Storage yet. Please contact support.")
+        val srt = downloadStorageText(storagePath, session)
+        val cues = SrtParser.parse(srt)
         require(cues.isNotEmpty()) { "The selected subtitle contains no valid cues." }
         return LoadedAuthorizedSubtitle(trackId = trackId, cues = cues)
     }
@@ -169,8 +168,10 @@ class CustomerSubtitleRepository(context: Context) {
                         id = id,
                         title = video?.optString("title")?.takeIf(String::isNotBlank) ?: "Untitled",
                         episodeLabel = video?.optString("episode_label").orEmpty(),
+                        provider = video?.optString("provider").orEmpty(),
                         languageCode = row.optString("language_code"),
                         languageName = row.optString("language_name").ifBlank { "Subtitle" },
+                        label = row.optString("label"),
                         cueCount = row.optInt("cue_count", 0),
                     )
                 )
@@ -184,27 +185,6 @@ class CustomerSubtitleRepository(context: Context) {
             is JSONArray -> value.optJSONObject(0)
             else -> null
         }
-    }
-
-    private fun parseCueArray(rows: JSONArray): List<SubtitleCue> {
-        return buildList {
-            for (index in 0 until rows.length()) {
-                val row = rows.optJSONObject(index) ?: continue
-                val startSeconds = row.optDouble("start", Double.NaN)
-                val endSeconds = row.optDouble("end", Double.NaN)
-                val text = row.optString("text").trim()
-                if (!startSeconds.isFinite() || !endSeconds.isFinite() || endSeconds <= startSeconds || text.isBlank()) {
-                    continue
-                }
-                add(
-                    SubtitleCue(
-                        startMs = (startSeconds * 1000.0).roundToLong(),
-                        endMs = (endSeconds * 1000.0).roundToLong(),
-                        text = text,
-                    )
-                )
-            }
-        }.sortedBy(SubtitleCue::startMs)
     }
 
     private fun parseAndSaveSession(payload: JSONObject, fallbackEmail: String): CustomerSession {

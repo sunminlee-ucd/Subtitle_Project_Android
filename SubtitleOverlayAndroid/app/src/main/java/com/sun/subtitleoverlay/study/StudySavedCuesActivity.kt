@@ -3,9 +3,7 @@ package com.sun.subtitleoverlay.study
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.net.Uri
 import android.os.Bundle
-import android.provider.OpenableColumns
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.EditText
@@ -14,12 +12,10 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.core.net.toUri
 import androidx.core.widget.doAfterTextChanged
 import com.sun.subtitleoverlay.MainActivity
-import com.sun.subtitleoverlay.subtitle.SrtParser
 import com.sun.subtitleoverlay.subtitle.SubtitleCue
-import java.security.MessageDigest
+import com.sun.subtitleoverlay.subtitle.SubtitleCueHandoff
 import java.util.Locale
 
 class StudySavedCuesActivity : ComponentActivity() {
@@ -100,17 +96,11 @@ class StudySavedCuesActivity : ComponentActivity() {
     private fun loadSavedCues() {
         runCatching {
             val preferences = getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE)
-            val uri = preferences.getString(MainActivity.KEY_LAST_SRT_URI, null)?.toUri()
-                ?: error("No SRT file is currently loaded.")
-            val filename = queryDisplayName(uri)
-            val content = contentResolver.openInputStream(uri)
-                ?.bufferedReader(Charsets.UTF_8)
-                ?.use { it.readText() }
-                ?: error("The selected SRT file cannot be opened.")
+            val snapshot = SubtitleCueHandoff.current()
+                ?: error("No subtitle is currently loaded in the overlay.")
 
-            cues = SrtParser.parse(content)
-            val subtitleListId = subtitleFingerprint(filename, content)
-            val stored = preferences.getString("$SELECTION_KEY_PREFIX$subtitleListId", "").orEmpty()
+            cues = snapshot.cues
+            val stored = preferences.getString("$SELECTION_KEY_PREFIX${snapshot.listId}", "").orEmpty()
             selectedCueIndices = stored
                 .split(',')
                 .mapNotNull(String::toIntOrNull)
@@ -190,22 +180,6 @@ class StudySavedCuesActivity : ComponentActivity() {
                 setPadding(dp(8), dp(6), dp(8), dp(14))
             }, matchWrap())
         }
-    }
-
-    private fun queryDisplayName(uri: Uri): String {
-        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            if (index >= 0 && cursor.moveToFirst()) {
-                return cursor.getString(index) ?: "subtitles.srt"
-            }
-        }
-        return uri.lastPathSegment ?: "subtitles.srt"
-    }
-
-    private fun subtitleFingerprint(filename: String, content: String): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-            .digest("$filename\u0000$content".toByteArray(Charsets.UTF_8))
-        return digest.take(12).joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
     }
 
     private fun formatTime(ms: Long): String {

@@ -25,16 +25,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
-import androidx.core.content.edit
 import androidx.core.net.toUri
 import com.sun.subtitleoverlay.customer.AuthorizedSubtitleTrack
 import com.sun.subtitleoverlay.customer.CustomerBackendConfig
 import com.sun.subtitleoverlay.customer.CustomerSession
 import com.sun.subtitleoverlay.customer.CustomerSubtitleRepository
 import com.sun.subtitleoverlay.overlay.OverlayService
-import com.sun.subtitleoverlay.subtitle.SrtParser
-import java.io.File
+import com.sun.subtitleoverlay.subtitle.SubtitleCueHandoff
 import java.util.concurrent.Executors
 
 @SuppressLint("SetTextI18n")
@@ -59,8 +56,6 @@ class MainActivity : ComponentActivity() {
     private val repository by lazy { CustomerSubtitleRepository(this) }
     private val executor = Executors.newSingleThreadExecutor()
 
-    private val preferences by lazy { getSharedPreferences(PREFS_NAME, MODE_PRIVATE) }
-
     private val requestNotifications = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) {
@@ -71,8 +66,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         window.statusBarColor = COLOR_SURFACE
         window.navigationBarColor = COLOR_SURFACE
-        File(cacheDir, AUTHORIZED_CACHE_FILENAME).delete()
-        preferences.edit { remove(KEY_LAST_SRT_URI) }
         setContentView(buildContent())
         requestNotificationPermissionIfNeeded()
         restoreCustomerSession()
@@ -363,7 +356,7 @@ class MainActivity : ComponentActivity() {
         setStatus("Signing out…")
         executor.execute {
             repository.signOut()
-            File(cacheDir, AUTHORIZED_CACHE_FILENAME).delete()
+            SubtitleCueHandoff.clear()
             runOnUiThread {
                 stopService(Intent(this, OverlayService::class.java))
                 selectedTrack = null
@@ -428,6 +421,8 @@ class MainActivity : ComponentActivity() {
                     track.episodeLabel,
                     track.languageCode,
                     track.languageName,
+                    track.label,
+                    track.provider,
                     track.displayTitle,
                     track.displayLabel,
                 ).joinToString(" ").lowercase().contains(query)
@@ -464,6 +459,8 @@ class MainActivity : ComponentActivity() {
                     append('\n')
                     append(track.languageName)
                     if (track.languageCode.isNotBlank()) append(" · ${track.languageCode.uppercase()}")
+                    if (track.label.isNotBlank() && !track.label.equals("Default", ignoreCase = true)) append(" · ${track.label}")
+                    if (track.provider.isNotBlank()) append(" · ${track.provider}")
                     if (track.cueCount > 0) append(" · ${track.cueCount} cues")
                 }
                 textSize = 14f
@@ -527,33 +524,30 @@ class MainActivity : ComponentActivity() {
         executor.execute {
             val result = runCatching {
                 val loaded = repository.loadAuthorizedSubtitle(track.id)
-                val file = File(cacheDir, AUTHORIZED_CACHE_FILENAME)
-                file.writeText(SrtParser.render(loaded.cues), Charsets.UTF_8)
-                PreparedSubtitle(file, track.displayLabel, loaded.cues.size)
+                val token = SubtitleCueHandoff.prepare(loaded.cues)
+                PreparedSubtitle(token, track.displayLabel, loaded.cues.size)
             }
             runOnUiThread {
                 result.onSuccess { prepared ->
-                    val contentUri = FileProvider.getUriForFile(
-                        this,
-                        "$packageName.privatefiles",
-                        prepared.file,
-                    )
                     val intent = Intent(this, OverlayService::class.java).apply {
                         action = OverlayService.ACTION_START
-                        data = contentUri
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        putExtra(OverlayService.EXTRA_CUE_HANDOFF_TOKEN, prepared.token)
                     }
-                    ContextCompat.startForegroundService(this, intent)
-                    window.decorView.postDelayed({ prepared.file.delete() }, CACHE_DELETE_DELAY_MS)
-                    setStatus("")
-                    Toast.makeText(
-                        this,
-                        "${prepared.cueCount} cues ready · ${prepared.label}",
-                        Toast.LENGTH_SHORT,
-                    ).show()
-                    moveTaskToBack(true)
+                    runCatching { ContextCompat.startForegroundService(this, intent) }
+                        .onSuccess {
+                            setStatus("")
+                            Toast.makeText(
+                                this,
+                                "${prepared.cueCount} cues ready · ${prepared.label}",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                            moveTaskToBack(true)
+                        }
+                        .onFailure { error ->
+                            SubtitleCueHandoff.clear(prepared.token)
+                            setStatus(error.message ?: "Unable to start subtitle overlay.")
+                        }
                 }.onFailure { error ->
-                    File(cacheDir, AUTHORIZED_CACHE_FILENAME).delete()
                     setStatus(error.message ?: "Unable to load this subtitle.")
                 }
             }
@@ -817,16 +811,13 @@ class MainActivity : ComponentActivity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private data class PreparedSubtitle(
-        val file: File,
+        val token: String,
         val label: String,
         val cueCount: Int,
     )
 
     companion object {
         const val PREFS_NAME = "subtitle_overlay"
-        const val KEY_LAST_SRT_URI = "last_srt_uri"
-        private const val AUTHORIZED_CACHE_FILENAME = "authorized-subtitle.srt"
-        private const val CACHE_DELETE_DELAY_MS = 5_000L
         private const val LIBRARY_LIST_HEIGHT_DP = 310
 
         private const val COLOR_SURFACE = 0xFF08090C.toInt()

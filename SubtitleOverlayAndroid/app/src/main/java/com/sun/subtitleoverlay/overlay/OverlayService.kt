@@ -20,7 +20,6 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
-import android.provider.OpenableColumns
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -32,15 +31,13 @@ import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.edit
-import androidx.core.net.toUri
 import com.sun.subtitleoverlay.MainActivity
 import com.sun.subtitleoverlay.playback.PlaybackNotificationListener
 import com.sun.subtitleoverlay.study.StudyPlaybackCommand
 import com.sun.subtitleoverlay.study.StudyPlaybackEngine
 import com.sun.subtitleoverlay.study.StudySavedCuesActivity
-import com.sun.subtitleoverlay.subtitle.SrtParser
 import com.sun.subtitleoverlay.subtitle.SubtitleCue
-import java.security.MessageDigest
+import com.sun.subtitleoverlay.subtitle.SubtitleCueHandoff
 
 @SuppressLint("SetTextI18n")
 class OverlayService : Service() {
@@ -57,6 +54,7 @@ class OverlayService : Service() {
     private var studyStatusView: TextView? = null
 
     private var cues: List<SubtitleCue> = emptyList()
+    private var activeCueToken = ""
     private var subtitleListId = ""
     private var renderedCueIndices: List<Int> = emptyList()
     private val selectedStudyCueIndices = linkedSetOf<Int>()
@@ -144,25 +142,26 @@ class OverlayService : Service() {
             return START_NOT_STICKY
         }
 
-        val uri = intent?.data ?: getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE)
-            .getString(MainActivity.KEY_LAST_SRT_URI, null)
-            ?.toUri()
-        if (uri == null) {
-            Toast.makeText(this, "Choose an SRT file first.", Toast.LENGTH_LONG).show()
+        val token = intent?.getStringExtra(EXTRA_CUE_HANDOFF_TOKEN).orEmpty()
+        val snapshot = SubtitleCueHandoff.get(token)
+        if (snapshot == null) {
+            Toast.makeText(
+                this,
+                "Subtitle data is no longer available in memory. Return to the app and start the overlay again.",
+                Toast.LENGTH_LONG,
+            ).show()
             stopSelf()
             return START_NOT_STICKY
         }
 
         startForeground(NOTIFICATION_ID, buildNotification())
         return runCatching {
-            val text = contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
-                ?: error("The SRT file cannot be opened.")
-            val parsedCues = SrtParser.parse(text)
-            require(parsedCues.isNotEmpty()) { "No valid subtitle cues were found." }
+            require(snapshot.cues.isNotEmpty()) { "No valid subtitle cues were found." }
 
             stopStudyRepeat(pause = false, userInitiated = false)
-            cues = parsedCues
-            subtitleListId = subtitleFingerprint(queryDisplayName(uri), text)
+            cues = snapshot.cues
+            activeCueToken = token
+            subtitleListId = snapshot.listId
             studyPlaybackEngine = StudyPlaybackEngine(cues)
             restoreStudySelection()
 
@@ -172,7 +171,8 @@ class OverlayService : Service() {
             startSessionMonitoring()
             START_STICKY
         }.getOrElse { error ->
-            Toast.makeText(this, "Unable to open SRT: ${error.message}", Toast.LENGTH_LONG).show()
+            SubtitleCueHandoff.clear(token)
+            Toast.makeText(this, "Unable to load subtitles: ${error.message}", Toast.LENGTH_LONG).show()
             stopSelf()
             START_NOT_STICKY
         }
@@ -186,6 +186,8 @@ class OverlayService : Service() {
         controllerView?.let(::removeWindowSafely)
         subtitleView = null
         controllerView = null
+        if (activeCueToken.isNotBlank()) SubtitleCueHandoff.clear(activeCueToken)
+        activeCueToken = ""
         super.onDestroy()
     }
 
@@ -946,22 +948,6 @@ class OverlayService : Service() {
 
     private fun studySelectionUpdatedKey(id: String) = "$KEY_STUDY_SELECTION_UPDATED_PREFIX$id"
 
-    private fun subtitleFingerprint(filename: String, content: String): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-            .digest("$filename\u0000$content".toByteArray(Charsets.UTF_8))
-        return digest.take(12).joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
-    }
-
-    private fun queryDisplayName(uri: android.net.Uri): String {
-        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            if (index >= 0 && cursor.moveToFirst()) {
-                return cursor.getString(index) ?: "subtitles.srt"
-            }
-        }
-        return uri.lastPathSegment ?: "subtitles.srt"
-    }
-
     private fun manualPositionMs(): Long {
         if (!isPlaying) return basePositionMs
         val elapsed = SystemClock.elapsedRealtime() - startedAtElapsedMs
@@ -1193,6 +1179,7 @@ class OverlayService : Service() {
         const val ACTION_STOP = "com.sun.subtitleoverlay.action.STOP"
         const val ACTION_SHOW_CONTROLS = "com.sun.subtitleoverlay.action.SHOW_CONTROLS"
         const val ACTION_HIDE_CONTROLS = "com.sun.subtitleoverlay.action.HIDE_CONTROLS"
+        const val EXTRA_CUE_HANDOFF_TOKEN = "cue_handoff_token"
 
         private const val CHANNEL_ID = "subtitle_overlay"
         private const val NOTIFICATION_ID = 100
