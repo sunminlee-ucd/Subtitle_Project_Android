@@ -69,9 +69,17 @@ class CustomerSubtitleRepository(context: Context) {
         if (stored.expiresAtEpochSeconds > now + SESSION_REFRESH_MARGIN_SECONDS) {
             return stored
         }
-        return runCatching { refreshSession(stored) }
-            .onFailure { clearSession() }
-            .getOrNull()
+
+        return try {
+            refreshSession(stored)
+        } catch (_: SessionRejectedException) {
+            clearSession()
+            null
+        } catch (_: Exception) {
+            // Keep the refresh token for transient network/server failures so the next
+            // app launch can retry automatic sign-in without asking for a password.
+            null
+        }
     }
 
     fun signOut() {
@@ -134,16 +142,27 @@ class CustomerSubtitleRepository(context: Context) {
     fun hasStoredSession(): Boolean = loadStoredSession() != null
 
     private fun requireSession(): CustomerSession {
-        return restoreSession() ?: error("Your session has expired. Please sign in again.")
+        return restoreSession() ?: error("Your session has expired or could not be refreshed. Please check your connection or sign in again.")
     }
 
     private fun refreshSession(stored: CustomerSession): CustomerSession {
-        if (stored.refreshToken.isBlank()) error("Your session has expired. Please sign in again.")
+        if (stored.refreshToken.isBlank()) {
+            throw SessionRejectedException("Your saved session cannot be refreshed.")
+        }
+
         val response = request(
             method = "POST",
             url = "${CustomerBackendConfig.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token",
             body = JSONObject().put("refresh_token", stored.refreshToken).toString(),
         )
+
+        if (response.status == HttpURLConnection.HTTP_BAD_REQUEST ||
+            response.status == HttpURLConnection.HTTP_UNAUTHORIZED ||
+            response.status == HttpURLConnection.HTTP_FORBIDDEN
+        ) {
+            throw SessionRejectedException(responseErrorMessage(response, "Your saved session is no longer valid."))
+        }
+
         ensureSuccess(response, "Unable to refresh your session")
         return parseAndSaveSession(JSONObject(response.body), fallbackEmail = stored.email)
     }
@@ -257,6 +276,10 @@ class CustomerSubtitleRepository(context: Context) {
 
     private fun ensureSuccess(response: HttpResponse, action: String) {
         if (response.status in 200..299) return
+        error(responseErrorMessage(response, "$action (HTTP ${response.status})."))
+    }
+
+    private fun responseErrorMessage(response: HttpResponse, fallback: String): String {
         val detail = runCatching {
             val payload = JSONObject(response.body)
             payload.optString("message")
@@ -264,7 +287,7 @@ class CustomerSubtitleRepository(context: Context) {
                 .ifBlank { payload.optString("msg") }
                 .ifBlank { payload.optString("error") }
         }.getOrNull().orEmpty()
-        error(if (detail.isBlank()) "$action (HTTP ${response.status})." else "$action: $detail")
+        return if (detail.isBlank()) fallback else detail
     }
 
     private fun encodeQueryValue(value: String): String =
@@ -273,6 +296,8 @@ class CustomerSubtitleRepository(context: Context) {
     private fun encodePathSegment(value: String): String = encodeQueryValue(value)
 
     private data class HttpResponse(val status: Int, val body: String)
+
+    private class SessionRejectedException(message: String) : IllegalStateException(message)
 
     companion object {
         private const val PREFS_NAME = "customer_auth"
