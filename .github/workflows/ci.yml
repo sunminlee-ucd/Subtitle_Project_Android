@@ -5,9 +5,11 @@ on:
   push:
     branches:
       - master
+    paths-ignore:
+      - 'APK/**'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   test:
@@ -59,3 +61,19 @@ jobs:
           path: SubtitleOverlayAndroid/app/build/outputs/apk/debug/subtitle-companion.apk
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish APK to dedicated folder
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        working-directory: .
+        run: |
+          mkdir -p APK
+          cp SubtitleOverlayAndroid/app/build/outputs/apk/debug/subtitle-companion.apk APK/subtitle-companion.apk
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f APK/subtitle-companion.apk
+          if git diff --cached --quiet; then
+            echo "APK is already up to date."
+            exit 0
+          fi
+          git commit -m "Update subtitle-companion APK"
+          git push origin HEAD:master
