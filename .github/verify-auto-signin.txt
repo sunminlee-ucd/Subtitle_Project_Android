@@ -1,0 +1,1 @@
+CI verification for automatic sign-in hardening.
