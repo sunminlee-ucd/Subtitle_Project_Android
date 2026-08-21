@@ -1,6 +1,7 @@
 package com.sun.subtitleoverlay
 
 import android.Manifest
+import android.app.AlertDialog
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -60,6 +61,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var statusView: TextView
 
     private var selectedTrack: AuthorizedSubtitleTrack? = null
+    private var multiSub1Track: AuthorizedSubtitleTrack? = null
+    private var multiSub2Track: AuthorizedSubtitleTrack? = null
     private var allTracks: List<AuthorizedSubtitleTrack> = emptyList()
     private var overlayStartInProgress = false
     private val repository by lazy { CustomerSubtitleRepository(this) }
@@ -506,6 +509,8 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 stopService(Intent(this, OverlayService::class.java))
                 selectedTrack = null
+                multiSub1Track = null
+                multiSub2Track = null
                 allTracks = emptyList()
                 if (::searchInput.isInitialized) searchInput.text.clear()
                 if (::tracksContainer.isInitialized) tracksContainer.removeAllViews()
@@ -537,6 +542,8 @@ class MainActivity : ComponentActivity() {
                     selectedTrack = selectedTrack?.let { selected ->
                         tracks.firstOrNull { it.id == selected.id }
                     }
+                    multiSub1Track = multiSub1Track?.let { selected -> tracks.firstOrNull { it.id == selected.id } }
+                    multiSub2Track = multiSub2Track?.let { selected -> tracks.firstOrNull { it.id == selected.id } }
                     updateSelectedTrackLabel()
                     renderFilteredTracks()
                     setStatus(
@@ -708,11 +715,128 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openMultiSubtitleSetup() {
-        Toast.makeText(
-            this,
-            "Multi Subtitle setup will be available here. Next step: choose two authorized subtitle languages.",
-            Toast.LENGTH_LONG,
-        ).show()
+        if (!repository.hasStoredSession()) {
+            Toast.makeText(this, "Sign in before setting up Multi Subtitle.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (allTracks.size < 2) {
+            Toast.makeText(this, "At least two authorized subtitles are required.", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), 0)
+        }
+        val sub1 = actionButton(multiTrackButtonLabel("Sub 1", multiSub1Track), secondary = true) {}
+        val sub2 = actionButton(multiTrackButtonLabel("Sub 2", multiSub2Track), secondary = true) {}
+        sub1.setOnClickListener {
+            showMultiTrackPicker("Choose Sub 1", multiSub1Track) { track ->
+                multiSub1Track = track
+                sub1.text = multiTrackButtonLabel("Sub 1", track)
+            }
+        }
+        sub2.setOnClickListener {
+            showMultiTrackPicker("Choose Sub 2", multiSub2Track) { track ->
+                multiSub2Track = track
+                sub2.text = multiTrackButtonLabel("Sub 2", track)
+            }
+        }
+        content.addView(sub1, matchWrap(bottom = dp(10)))
+        content.addView(sub2, matchWrap())
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Multi Subtitle")
+            .setMessage("Choose two authorized subtitles. Sub 1 and Sub 2 can be moved and resized independently on the video.")
+            .setView(content)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Start", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val first = multiSub1Track
+                val second = multiSub2Track
+                when {
+                    first == null || second == null -> Toast.makeText(this, "Choose both Sub 1 and Sub 2.", Toast.LENGTH_SHORT).show()
+                    first.id == second.id -> Toast.makeText(this, "Choose two different subtitles.", Toast.LENGTH_SHORT).show()
+                    else -> {
+                        dialog.dismiss()
+                        startMultiSubtitleOverlay(first, second)
+                    }
+                }
+            }
+        }
+        dialog.show()
+    }
+
+    private fun showMultiTrackPicker(
+        title: String,
+        current: AuthorizedSubtitleTrack?,
+        onSelected: (AuthorizedSubtitleTrack) -> Unit,
+    ) {
+        val labels = allTracks.map { it.displayLabel }.toTypedArray()
+        val checked = allTracks.indexOfFirst { it.id == current?.id }
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setSingleChoiceItems(labels, checked) { dialog, which ->
+                onSelected(allTracks[which])
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun multiTrackButtonLabel(slot: String, track: AuthorizedSubtitleTrack?): String =
+        if (track == null) "$slot · Choose subtitle" else "$slot · ${track.displayLabel}"
+
+    private fun startMultiSubtitleOverlay(
+        first: AuthorizedSubtitleTrack,
+        second: AuthorizedSubtitleTrack,
+    ) {
+        if (overlayStartInProgress) return
+        if (!Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, "Display over other apps is required before starting subtitles.", Toast.LENGTH_LONG).show()
+            openOverlaySettings()
+            return
+        }
+        setOverlayLoading(true, "Loading Sub 1 and Sub 2 from private storage…")
+        setStatus("Loading both private subtitles…")
+        executor.execute {
+            val result = runCatching {
+                val loaded1 = repository.loadAuthorizedSubtitle(first.id)
+                val loaded2 = repository.loadAuthorizedSubtitle(second.id)
+                val token = SubtitleCueHandoff.prepare(loaded1.cues, loaded2.cues)
+                PreparedSubtitle(
+                    token = token,
+                    label = "${first.languageName} + ${second.languageName}",
+                    cueCount = loaded1.cues.size + loaded2.cues.size,
+                )
+            }
+            runOnUiThread {
+                result.onSuccess { prepared ->
+                    setOverlayLoading(true, "Starting Multi Subtitle overlay…")
+                    val intent = Intent(this, OverlayService::class.java).apply {
+                        action = OverlayService.ACTION_START
+                        putExtra(OverlayService.EXTRA_CUE_HANDOFF_TOKEN, prepared.token)
+                    }
+                    runCatching { ContextCompat.startForegroundService(this, intent) }
+                        .onSuccess {
+                            setOverlayLoading(false)
+                            setStatus("")
+                            Toast.makeText(this, "Multi Subtitle ready · ${prepared.label}", Toast.LENGTH_SHORT).show()
+                            moveTaskToBack(true)
+                        }
+                        .onFailure { error ->
+                            SubtitleCueHandoff.clear(prepared.token)
+                            setOverlayLoading(false)
+                            setStatus(error.message ?: "Unable to start Multi Subtitle overlay.")
+                        }
+                }.onFailure { error ->
+                    setOverlayLoading(false)
+                    setStatus(error.message ?: "Unable to load both subtitles.")
+                }
+            }
+        }
     }
 
     private fun openRequestPortal() {

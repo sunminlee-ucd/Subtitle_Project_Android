@@ -46,6 +46,7 @@ class OverlayService : Service() {
     private lateinit var mediaSessionManager: MediaSessionManager
 
     private var subtitleView: TextView? = null
+    private var secondarySubtitleView: TextView? = null
     private var controllerView: View? = null
     private var positionView: TextView? = null
     private var statusView: TextView? = null
@@ -55,9 +56,11 @@ class OverlayService : Service() {
     private var studyStatusView: TextView? = null
 
     private var cues: List<SubtitleCue> = emptyList()
+    private var secondaryCues: List<SubtitleCue> = emptyList()
     private var activeCueToken = ""
     private var subtitleListId = ""
     private var renderedCueIndices: List<Int> = emptyList()
+    private var renderedSecondaryCueIndices: List<Int> = emptyList()
     private val selectedStudyCueIndices = linkedSetOf<Int>()
     private var studyPlaybackEngine: StudyPlaybackEngine? = null
 
@@ -74,6 +77,9 @@ class OverlayService : Service() {
     private var subtitleTextSizeSp = DEFAULT_SUBTITLE_TEXT_SIZE_SP
     private var subtitleBottomMarginDp = DEFAULT_SUBTITLE_BOTTOM_MARGIN_DP
     private var subtitleHorizontalOffsetDp = DEFAULT_SUBTITLE_HORIZONTAL_OFFSET_DP
+    private var secondarySubtitleTextSizeSp = DEFAULT_SECONDARY_SUBTITLE_TEXT_SIZE_SP
+    private var secondarySubtitleBottomMarginDp = DEFAULT_SECONDARY_SUBTITLE_BOTTOM_MARGIN_DP
+    private var secondarySubtitleHorizontalOffsetDp = DEFAULT_SUBTITLE_HORIZONTAL_OFFSET_DP
     private var lastSessionRefreshMs = 0L
 
     private var activeController: MediaController? = null
@@ -114,6 +120,18 @@ class OverlayService : Service() {
         subtitleBottomMarginDp = preferences.getInt(KEY_SUBTITLE_BOTTOM_MARGIN, DEFAULT_SUBTITLE_BOTTOM_MARGIN_DP)
         subtitleHorizontalOffsetDp = preferences.getInt(
             KEY_SUBTITLE_HORIZONTAL_OFFSET,
+            DEFAULT_SUBTITLE_HORIZONTAL_OFFSET_DP,
+        )
+        secondarySubtitleTextSizeSp = preferences.getFloat(
+            KEY_SECONDARY_SUBTITLE_TEXT_SIZE,
+            DEFAULT_SECONDARY_SUBTITLE_TEXT_SIZE_SP,
+        )
+        secondarySubtitleBottomMarginDp = preferences.getInt(
+            KEY_SECONDARY_SUBTITLE_BOTTOM_MARGIN,
+            DEFAULT_SECONDARY_SUBTITLE_BOTTOM_MARGIN_DP,
+        )
+        secondarySubtitleHorizontalOffsetDp = preferences.getInt(
+            KEY_SECONDARY_SUBTITLE_HORIZONTAL_OFFSET,
             DEFAULT_SUBTITLE_HORIZONTAL_OFFSET_DP,
         )
         manualPlaybackSpeed = preferences.getFloat(KEY_PLAYBACK_SPEED, DEFAULT_PLAYBACK_SPEED)
@@ -166,6 +184,7 @@ class OverlayService : Service() {
 
             stopStudyRepeat(pause = false, userInitiated = false)
             cues = snapshot.cues
+            secondaryCues = snapshot.secondaryCues
             activeCueToken = token
             subtitleListId = snapshot.listId
             studyPlaybackEngine = StudyPlaybackEngine(cues)
@@ -189,8 +208,10 @@ class OverlayService : Service() {
         stopStudyRepeat(pause = false, userInitiated = false)
         stopSessionMonitoring()
         subtitleView?.let(::removeWindowSafely)
+        secondarySubtitleView?.let(::removeWindowSafely)
         controllerView?.let(::removeWindowSafely)
         subtitleView = null
+        secondarySubtitleView = null
         controllerView = null
         if (activeCueToken.isNotBlank()) SubtitleCueHandoff.clear(activeCueToken)
         activeCueToken = ""
@@ -201,10 +222,16 @@ class OverlayService : Service() {
 
     private fun showWindows() {
         subtitleView?.let(::removeWindowSafely)
+        secondarySubtitleView?.let(::removeWindowSafely)
         controllerView?.let(::removeWindowSafely)
 
-        subtitleView = createSubtitleView().also {
-            windowManager.addView(it, subtitleLayoutParams())
+        subtitleView = createSubtitleView(slot = 1).also {
+            windowManager.addView(it, subtitleLayoutParams(slot = 1))
+        }
+        secondarySubtitleView = secondaryCues.takeIf { it.isNotEmpty() }?.let {
+            createSubtitleView(slot = 2).also { view ->
+                windowManager.addView(view, subtitleLayoutParams(slot = 2))
+            }
         }
         controllerView = createController().also {
             windowManager.addView(it, controllerLayoutParams())
@@ -215,8 +242,8 @@ class OverlayService : Service() {
         handler.post(ticker)
     }
 
-    private fun createSubtitleView(): TextView = TextView(this).apply {
-        textSize = subtitleTextSizeSp
+    private fun createSubtitleView(slot: Int): TextView = TextView(this).apply {
+        textSize = if (slot == 1) subtitleTextSizeSp else secondarySubtitleTextSizeSp
         typeface = Typeface.DEFAULT_BOLD
         setTextColor(Color.WHITE)
         setShadowLayer(4f, 1f, 1f, Color.BLACK)
@@ -225,8 +252,8 @@ class OverlayService : Service() {
         setPadding(dp(14), dp(7), dp(14), dp(7))
         background = normalSubtitleBackground()
         visibility = View.INVISIBLE
-        setOnClickListener { toggleRenderedStudyCues() }
-        installSubtitleGestures(this)
+        if (slot == 1) setOnClickListener { toggleRenderedStudyCues() }
+        installSubtitleGestures(this, slot)
     }
 
     private fun createController(): View {
@@ -545,7 +572,7 @@ class OverlayService : Service() {
         }
     }
 
-    private fun installSubtitleGestures(view: TextView) {
+    private fun installSubtitleGestures(view: TextView, slot: Int) {
         var initialX = 0
         var initialY = 0
         var touchX = 0f
@@ -562,12 +589,18 @@ class OverlayService : Service() {
                 }
 
                 override fun onScale(detector: ScaleGestureDetector): Boolean {
-                    setSubtitleTextSize(subtitleTextSizeSp * detector.scaleFactor, persist = false)
+                    if (slot == 1) {
+                        setSubtitleTextSize(subtitleTextSizeSp * detector.scaleFactor, persist = false)
+                    } else {
+                        secondarySubtitleTextSizeSp = (secondarySubtitleTextSizeSp * detector.scaleFactor)
+                            .coerceIn(MIN_SUBTITLE_TEXT_SIZE_SP, MAX_SUBTITLE_TEXT_SIZE_SP)
+                        secondarySubtitleView?.textSize = secondarySubtitleTextSizeSp
+                    }
                     return true
                 }
 
                 override fun onScaleEnd(detector: ScaleGestureDetector) {
-                    saveSubtitleTextSize()
+                    if (slot == 1) saveSubtitleTextSize() else saveSecondarySubtitleState()
                 }
             },
         )
@@ -601,10 +634,8 @@ class OverlayService : Service() {
                         val dy = (event.rawY - touchY).toInt()
                         if (dragging || kotlin.math.abs(dx) > dp(6) || kotlin.math.abs(dy) > dp(6)) {
                             dragging = true
-                            val maxX = (resources.displayMetrics.widthPixels / 2 - dp(24)).coerceAtLeast(0)
-                            val maxY = (resources.displayMetrics.heightPixels - dp(48)).coerceAtLeast(0)
-                            params.x = (initialX + dx).coerceIn(-maxX, maxX)
-                            params.y = (initialY - dy).coerceIn(0, maxY)
+                            params.x = initialX + dx
+                            params.y = initialY - dy
                             windowManager.updateViewLayout(view, params)
                             true
                         } else {
@@ -615,10 +646,16 @@ class OverlayService : Service() {
 
                 MotionEvent.ACTION_UP -> {
                     if (dragging) {
-                        subtitleHorizontalOffsetDp = pxToDp(params.x)
-                        subtitleBottomMarginDp = pxToDp(params.y)
-                        saveSubtitlePosition()
-                    } else if (!scaled && studyModeEnabled) {
+                        if (slot == 1) {
+                            subtitleHorizontalOffsetDp = pxToDp(params.x)
+                            subtitleBottomMarginDp = pxToDp(params.y)
+                            saveSubtitlePosition()
+                        } else {
+                            secondarySubtitleHorizontalOffsetDp = pxToDp(params.x)
+                            secondarySubtitleBottomMarginDp = pxToDp(params.y)
+                            saveSecondarySubtitleState()
+                        }
+                    } else if (!scaled && studyModeEnabled && slot == 1) {
                         view.performClick()
                     }
                     true
@@ -627,6 +664,14 @@ class OverlayService : Service() {
                 MotionEvent.ACTION_CANCEL -> true
                 else -> true
             }
+        }
+    }
+
+    private fun saveSecondarySubtitleState() {
+        getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE).edit {
+            putFloat(KEY_SECONDARY_SUBTITLE_TEXT_SIZE, secondarySubtitleTextSizeSp)
+            putInt(KEY_SECONDARY_SUBTITLE_BOTTOM_MARGIN, secondarySubtitleBottomMarginDp)
+            putInt(KEY_SECONDARY_SUBTITLE_HORIZONTAL_OFFSET, secondarySubtitleHorizontalOffsetDp)
         }
     }
 
@@ -668,7 +713,7 @@ class OverlayService : Service() {
         }
     }
 
-    private fun subtitleLayoutParams() = WindowManager.LayoutParams(
+    private fun subtitleLayoutParams(slot: Int) = WindowManager.LayoutParams(
         WindowManager.LayoutParams.WRAP_CONTENT,
         WindowManager.LayoutParams.WRAP_CONTENT,
         WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -677,8 +722,8 @@ class OverlayService : Service() {
         PixelFormat.TRANSLUCENT,
     ).apply {
         gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-        x = dp(subtitleHorizontalOffsetDp)
-        y = dp(subtitleBottomMarginDp)
+        x = dp(if (slot == 1) subtitleHorizontalOffsetDp else secondarySubtitleHorizontalOffsetDp)
+        y = dp(if (slot == 1) subtitleBottomMarginDp else secondarySubtitleBottomMarginDp)
     }
 
     private fun controllerLayoutParams() = WindowManager.LayoutParams(
@@ -699,6 +744,7 @@ class OverlayService : Service() {
         startedAtElapsedMs = SystemClock.elapsedRealtime()
         offsetMs = 0L
         renderedCueIndices = emptyList()
+        renderedSecondaryCueIndices = emptyList()
         studyPlaybackEngine?.stop()
         studyStoppedByUser = false
         updateOverlay()
@@ -1092,13 +1138,31 @@ class OverlayService : Service() {
             updateSubtitleAppearance()
         }
 
+        if (secondaryCues.isNotEmpty()) {
+            val nextSecondary = activeCueIndices(secondaryCues, subtitlePosition)
+            if (nextSecondary != renderedSecondaryCueIndices) {
+                renderedSecondaryCueIndices = nextSecondary
+                secondarySubtitleView?.apply {
+                    if (renderedSecondaryCueIndices.isNotEmpty()) {
+                        text = renderedSecondaryCueIndices.joinToString("\n") { index -> secondaryCues[index].text }
+                        visibility = View.VISIBLE
+                    } else {
+                        text = ""
+                        visibility = View.INVISIBLE
+                    }
+                }
+            }
+        }
+
         positionView?.text = "${formatTime(rawPosition)}  Δ${formatOffset(offsetMs)}"
         updateControllerState()
         updateStudyStatus()
     }
 
-    private fun activeCueIndices(positionMs: Long): List<Int> = cues.indices.filter { index ->
-        val cue = cues[index]
+    private fun activeCueIndices(positionMs: Long): List<Int> = activeCueIndices(cues, positionMs)
+
+    private fun activeCueIndices(source: List<SubtitleCue>, positionMs: Long): List<Int> = source.indices.filter { index ->
+        val cue = source[index]
         cue.startMs <= positionMs && positionMs < cue.endMs
     }
 
@@ -1289,6 +1353,9 @@ class OverlayService : Service() {
         private const val KEY_SUBTITLE_TEXT_SIZE = "subtitle_text_size_sp"
         private const val KEY_SUBTITLE_BOTTOM_MARGIN = "subtitle_bottom_margin_dp"
         private const val KEY_SUBTITLE_HORIZONTAL_OFFSET = "subtitle_horizontal_offset_dp"
+        private const val KEY_SECONDARY_SUBTITLE_TEXT_SIZE = "secondary_subtitle_text_size_sp"
+        private const val KEY_SECONDARY_SUBTITLE_BOTTOM_MARGIN = "secondary_subtitle_bottom_margin_dp"
+        private const val KEY_SECONDARY_SUBTITLE_HORIZONTAL_OFFSET = "secondary_subtitle_horizontal_offset_dp"
         private const val KEY_PLAYBACK_SPEED = "playback_speed"
         private const val KEY_STUDY_MODE = "study_mode_enabled"
         private const val KEY_STUDY_REPEAT_COUNT = "study_repeat_count"
@@ -1301,6 +1368,8 @@ class OverlayService : Service() {
         private const val TEXT_SIZE_STEP_SP = 2f
         private const val DEFAULT_SUBTITLE_BOTTOM_MARGIN_DP = 24
         private const val DEFAULT_SUBTITLE_HORIZONTAL_OFFSET_DP = 0
+        private const val DEFAULT_SECONDARY_SUBTITLE_TEXT_SIZE_SP = 20f
+        private const val DEFAULT_SECONDARY_SUBTITLE_BOTTOM_MARGIN_DP = 86
         private const val MIN_SUBTITLE_BOTTOM_MARGIN_DP = 0
         private const val MAX_SUBTITLE_BOTTOM_MARGIN_DP = 240
         private const val POSITION_STEP_DP = 12

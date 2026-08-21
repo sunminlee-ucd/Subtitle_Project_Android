@@ -7,20 +7,28 @@ data class SubtitleCueSnapshot(
     val token: String,
     val listId: String,
     val cues: List<SubtitleCue>,
+    val secondaryListId: String? = null,
+    val secondaryCues: List<SubtitleCue> = emptyList(),
 )
 
 object SubtitleCueHandoff {
     private var active: SubtitleCueSnapshot? = null
 
     @Synchronized
-    fun prepare(cues: List<SubtitleCue>): String {
-        require(cues.isNotEmpty()) { "No subtitle cues are available." }
-        val copiedCues = cues.toList()
+    fun prepare(cues: List<SubtitleCue>): String = prepare(cues, emptyList())
+
+    @Synchronized
+    fun prepare(primaryCues: List<SubtitleCue>, secondaryCues: List<SubtitleCue>): String {
+        require(primaryCues.isNotEmpty()) { "No primary subtitle cues are available." }
+        val copiedPrimary = primaryCues.toList()
+        val copiedSecondary = secondaryCues.toList()
         val token = UUID.randomUUID().toString()
         active = SubtitleCueSnapshot(
             token = token,
-            listId = fingerprint(copiedCues),
-            cues = copiedCues,
+            listId = fingerprint(copiedPrimary),
+            cues = copiedPrimary,
+            secondaryListId = copiedSecondary.takeIf { it.isNotEmpty() }?.let(::fingerprint),
+            secondaryCues = copiedSecondary,
         )
         return token
     }
