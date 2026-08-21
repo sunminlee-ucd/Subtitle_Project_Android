@@ -133,6 +133,10 @@ class MainActivity : ComponentActivity() {
 
             addView(actionButton("Request a subtitle", secondary = true) {
                 openRequestPortal()
+            }, matchWrap(bottom = dp(8)))
+
+            addView(actionButton("Multi Subtitle", secondary = true) {
+                openMultiSubtitleSetup()
             }, matchWrap(bottom = dp(18)))
 
             authCard = sectionCard().apply {
@@ -701,6 +705,14 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    private fun openMultiSubtitleSetup() {
+        Toast.makeText(
+            this,
+            "Multi Subtitle setup will be available here. Next step: choose two authorized subtitle languages.",
+            Toast.LENGTH_LONG,
+        ).show()
     }
 
     private fun openRequestPortal() {

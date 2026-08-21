@@ -23,6 +23,7 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.WindowManager
 import android.widget.LinearLayout
@@ -72,6 +73,7 @@ class OverlayService : Service() {
     private var studyStoppedByUser = false
     private var subtitleTextSizeSp = DEFAULT_SUBTITLE_TEXT_SIZE_SP
     private var subtitleBottomMarginDp = DEFAULT_SUBTITLE_BOTTOM_MARGIN_DP
+    private var subtitleHorizontalOffsetDp = DEFAULT_SUBTITLE_HORIZONTAL_OFFSET_DP
     private var lastSessionRefreshMs = 0L
 
     private var activeController: MediaController? = null
@@ -110,6 +112,10 @@ class OverlayService : Service() {
         val preferences = getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE)
         subtitleTextSizeSp = preferences.getFloat(KEY_SUBTITLE_TEXT_SIZE, DEFAULT_SUBTITLE_TEXT_SIZE_SP)
         subtitleBottomMarginDp = preferences.getInt(KEY_SUBTITLE_BOTTOM_MARGIN, DEFAULT_SUBTITLE_BOTTOM_MARGIN_DP)
+        subtitleHorizontalOffsetDp = preferences.getInt(
+            KEY_SUBTITLE_HORIZONTAL_OFFSET,
+            DEFAULT_SUBTITLE_HORIZONTAL_OFFSET_DP,
+        )
         manualPlaybackSpeed = preferences.getFloat(KEY_PLAYBACK_SPEED, DEFAULT_PLAYBACK_SPEED)
             .coerceIn(PLAYBACK_SPEEDS.first(), PLAYBACK_SPEEDS.last())
         studyModeEnabled = preferences.getBoolean(KEY_STUDY_MODE, false)
@@ -220,6 +226,7 @@ class OverlayService : Service() {
         background = normalSubtitleBackground()
         visibility = View.INVISIBLE
         setOnClickListener { toggleRenderedStudyCues() }
+        installSubtitleGestures(this)
     }
 
     private fun createController(): View {
@@ -492,13 +499,20 @@ class OverlayService : Service() {
     }
 
     private fun changeSubtitleTextSize(deltaSp: Float) {
-        subtitleTextSizeSp = (subtitleTextSizeSp + deltaSp)
-            .coerceIn(MIN_SUBTITLE_TEXT_SIZE_SP, MAX_SUBTITLE_TEXT_SIZE_SP)
+        setSubtitleTextSize(subtitleTextSizeSp + deltaSp, persist = true)
+    }
+
+    private fun setSubtitleTextSize(sizeSp: Float, persist: Boolean) {
+        subtitleTextSizeSp = sizeSp.coerceIn(MIN_SUBTITLE_TEXT_SIZE_SP, MAX_SUBTITLE_TEXT_SIZE_SP)
         subtitleView?.textSize = subtitleTextSizeSp
+        if (persist) saveSubtitleTextSize()
+        updateOverlay()
+    }
+
+    private fun saveSubtitleTextSize() {
         getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE).edit {
             putFloat(KEY_SUBTITLE_TEXT_SIZE, subtitleTextSizeSp)
         }
-        updateOverlay()
     }
 
     private fun changeSubtitlePosition(deltaDp: Int) {
@@ -510,6 +524,7 @@ class OverlayService : Service() {
 
     private fun resetSubtitlePosition() {
         subtitleBottomMarginDp = DEFAULT_SUBTITLE_BOTTOM_MARGIN_DP
+        subtitleHorizontalOffsetDp = DEFAULT_SUBTITLE_HORIZONTAL_OFFSET_DP
         applySubtitlePosition()
         saveSubtitlePosition()
     }
@@ -517,6 +532,7 @@ class OverlayService : Service() {
     private fun applySubtitlePosition() {
         val view = subtitleView ?: return
         val params = view.layoutParams as? WindowManager.LayoutParams ?: return
+        params.x = dp(subtitleHorizontalOffsetDp)
         params.y = dp(subtitleBottomMarginDp)
         windowManager.updateViewLayout(view, params)
         updateOverlay()
@@ -525,6 +541,92 @@ class OverlayService : Service() {
     private fun saveSubtitlePosition() {
         getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE).edit {
             putInt(KEY_SUBTITLE_BOTTOM_MARGIN, subtitleBottomMarginDp)
+            putInt(KEY_SUBTITLE_HORIZONTAL_OFFSET, subtitleHorizontalOffsetDp)
+        }
+    }
+
+    private fun installSubtitleGestures(view: TextView) {
+        var initialX = 0
+        var initialY = 0
+        var touchX = 0f
+        var touchY = 0f
+        var dragging = false
+        var scaled = false
+
+        val scaleDetector = ScaleGestureDetector(
+            this,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                    scaled = true
+                    return true
+                }
+
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    setSubtitleTextSize(subtitleTextSizeSp * detector.scaleFactor, persist = false)
+                    return true
+                }
+
+                override fun onScaleEnd(detector: ScaleGestureDetector) {
+                    saveSubtitleTextSize()
+                }
+            },
+        )
+
+        view.setOnTouchListener { _, event ->
+            scaleDetector.onTouchEvent(event)
+            val params = view.layoutParams as? WindowManager.LayoutParams
+                ?: return@setOnTouchListener false
+
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    initialX = params.x
+                    initialY = params.y
+                    touchX = event.rawX
+                    touchY = event.rawY
+                    dragging = false
+                    scaled = false
+                    true
+                }
+
+                MotionEvent.ACTION_POINTER_DOWN -> {
+                    scaled = true
+                    true
+                }
+
+                MotionEvent.ACTION_MOVE -> {
+                    if (scaleDetector.isInProgress || event.pointerCount > 1) {
+                        true
+                    } else {
+                        val dx = (event.rawX - touchX).toInt()
+                        val dy = (event.rawY - touchY).toInt()
+                        if (dragging || kotlin.math.abs(dx) > dp(6) || kotlin.math.abs(dy) > dp(6)) {
+                            dragging = true
+                            val maxX = (resources.displayMetrics.widthPixels / 2 - dp(24)).coerceAtLeast(0)
+                            val maxY = (resources.displayMetrics.heightPixels - dp(48)).coerceAtLeast(0)
+                            params.x = (initialX + dx).coerceIn(-maxX, maxX)
+                            params.y = (initialY - dy).coerceIn(0, maxY)
+                            windowManager.updateViewLayout(view, params)
+                            true
+                        } else {
+                            true
+                        }
+                    }
+                }
+
+                MotionEvent.ACTION_UP -> {
+                    if (dragging) {
+                        subtitleHorizontalOffsetDp = pxToDp(params.x)
+                        subtitleBottomMarginDp = pxToDp(params.y)
+                        saveSubtitlePosition()
+                    } else if (!scaled && studyModeEnabled) {
+                        view.performClick()
+                    }
+                    true
+                }
+
+                MotionEvent.ACTION_CANCEL -> true
+                else -> true
+            }
         }
     }
 
@@ -571,11 +673,11 @@ class OverlayService : Service() {
         WindowManager.LayoutParams.WRAP_CONTENT,
         WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            (if (studyModeEnabled) 0 else WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
         PixelFormat.TRANSLUCENT,
     ).apply {
         gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+        x = dp(subtitleHorizontalOffsetDp)
         y = dp(subtitleBottomMarginDp)
     }
 
@@ -876,16 +978,12 @@ class OverlayService : Service() {
     private fun updateSubtitleTouchability() {
         val view = subtitleView ?: return
         val params = view.layoutParams as? WindowManager.LayoutParams ?: return
-        params.flags = if (studyModeEnabled) {
-            params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-        } else {
-            params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-        }
-        view.isClickable = studyModeEnabled
+        params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        view.isClickable = true
         view.contentDescription = if (studyModeEnabled) {
-            "Tap subtitle to save or remove it from the study list"
+            "Drag subtitle to move it. Pinch to resize it. Tap to save or remove it from the study list."
         } else {
-            null
+            "Drag subtitle to move it. Pinch with two fingers to resize it."
         }
         windowManager.updateViewLayout(view, params)
     }
@@ -1174,6 +1272,9 @@ class OverlayService : Service() {
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
+    private fun pxToDp(value: Int): Int =
+        (value / resources.displayMetrics.density).toInt()
+
     companion object {
         const val ACTION_START = "com.sun.subtitleoverlay.action.START"
         const val ACTION_STOP = "com.sun.subtitleoverlay.action.STOP"
@@ -1187,6 +1288,7 @@ class OverlayService : Service() {
         private const val SESSION_REFRESH_MS = 1_500L
         private const val KEY_SUBTITLE_TEXT_SIZE = "subtitle_text_size_sp"
         private const val KEY_SUBTITLE_BOTTOM_MARGIN = "subtitle_bottom_margin_dp"
+        private const val KEY_SUBTITLE_HORIZONTAL_OFFSET = "subtitle_horizontal_offset_dp"
         private const val KEY_PLAYBACK_SPEED = "playback_speed"
         private const val KEY_STUDY_MODE = "study_mode_enabled"
         private const val KEY_STUDY_REPEAT_COUNT = "study_repeat_count"
@@ -1198,6 +1300,7 @@ class OverlayService : Service() {
         private const val MAX_SUBTITLE_TEXT_SIZE_SP = 36f
         private const val TEXT_SIZE_STEP_SP = 2f
         private const val DEFAULT_SUBTITLE_BOTTOM_MARGIN_DP = 24
+        private const val DEFAULT_SUBTITLE_HORIZONTAL_OFFSET_DP = 0
         private const val MIN_SUBTITLE_BOTTOM_MARGIN_DP = 0
         private const val MAX_SUBTITLE_BOTTOM_MARGIN_DP = 240
         private const val POSITION_STEP_DP = 12
