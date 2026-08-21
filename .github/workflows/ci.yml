@@ -5,7 +5,6 @@ on:
   push:
     branches:
       - master
-      - agent/dual-subtitle-complete
     paths-ignore:
       - 'APK/**'
 
@@ -22,18 +21,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref || github.ref_name }}
-
-      - name: Apply dual subtitle patch
-        working-directory: .
-        run: |
-          if grep -q 'startMultiSubtitleOverlay' SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/MainActivity.kt \
-             && grep -q 'secondarySubtitleView' SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/overlay/OverlayService.kt; then
-            echo "Dual subtitle changes already applied."
-          else
-            python .github/dual-subtitle-patch.py
-          fi
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -75,21 +62,18 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish implementation to branch
-        if: github.event_name == 'push'
+      - name: Publish APK to dedicated folder
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         working-directory: .
         run: |
           mkdir -p APK
           cp SubtitleOverlayAndroid/app/build/outputs/apk/debug/subtitle-companion.apk APK/subtitle-companion.apk
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/MainActivity.kt
-          git add SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/overlay/OverlayService.kt
-          git add SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/subtitle/SubtitleCueHandoff.kt
           git add -f APK/subtitle-companion.apk
           if git diff --cached --quiet; then
-            echo "Implementation and APK are already up to date."
+            echo "APK is already up to date."
             exit 0
           fi
-          git commit -m "Complete dual subtitle overlay"
-          git push origin HEAD:${GITHUB_REF_NAME}
+          git commit -m "Update subtitle-companion APK"
+          git push origin HEAD:master
