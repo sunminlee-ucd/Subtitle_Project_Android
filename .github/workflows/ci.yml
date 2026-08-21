@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
 
       - name: Apply subtitle gesture patch
         working-directory: .
@@ -74,7 +76,7 @@ jobs:
           retention-days: 30
 
       - name: Publish source and APK to branch
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
         working-directory: .
         run: |
           mkdir -p APK
@@ -89,4 +91,5 @@ jobs:
             exit 0
           fi
           git commit -m "Add multi subtitle entry and touch gestures"
-          git push origin HEAD:${GITHUB_REF_NAME}
+          TARGET_BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          git push origin HEAD:${TARGET_BRANCH}
