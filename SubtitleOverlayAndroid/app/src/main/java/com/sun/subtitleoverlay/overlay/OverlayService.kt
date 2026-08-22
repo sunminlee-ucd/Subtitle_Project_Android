@@ -25,6 +25,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -577,14 +578,17 @@ class OverlayService : Service() {
         var initialY = 0
         var touchX = 0f
         var touchY = 0f
-        var dragging = false
-        var scaled = false
+        var dragLocked = false
+        var scaleLocked = false
+        var tapCandidate = false
+        val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
 
         val scaleDetector = ScaleGestureDetector(
             this,
             object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
                 override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
-                    scaled = true
+                    scaleLocked = true
+                    tapCandidate = false
                     return true
                 }
 
@@ -616,52 +620,71 @@ class OverlayService : Service() {
                     initialY = params.y
                     touchX = event.rawX
                     touchY = event.rawY
-                    dragging = false
-                    scaled = false
+                    dragLocked = false
+                    scaleLocked = false
+                    tapCandidate = studyModeEnabled && slot == 1
                     true
                 }
 
                 MotionEvent.ACTION_POINTER_DOWN -> {
-                    scaled = true
+                    scaleLocked = true
+                    tapCandidate = false
                     true
                 }
 
                 MotionEvent.ACTION_MOVE -> {
-                    if (scaleDetector.isInProgress || event.pointerCount > 1) {
+                    if (scaleLocked || scaleDetector.isInProgress || event.pointerCount > 1) {
+                        scaleLocked = true
+                        tapCandidate = false
                         true
                     } else {
                         val dx = (event.rawX - touchX).toInt()
                         val dy = (event.rawY - touchY).toInt()
-                        if (dragging || kotlin.math.abs(dx) > dp(6) || kotlin.math.abs(dy) > dp(6)) {
-                            dragging = true
+                        if (!dragLocked && (kotlin.math.abs(dx) > touchSlop || kotlin.math.abs(dy) > touchSlop)) {
+                            dragLocked = true
+                            tapCandidate = false
+                        }
+                        if (dragLocked) {
                             params.x = initialX + dx
                             params.y = initialY - dy
                             windowManager.updateViewLayout(view, params)
-                            true
-                        } else {
-                            true
                         }
+                        true
                     }
                 }
 
-                MotionEvent.ACTION_UP -> {
-                    if (dragging) {
-                        if (slot == 1) {
-                            subtitleHorizontalOffsetDp = pxToDp(params.x)
-                            subtitleBottomMarginDp = pxToDp(params.y)
-                            saveSubtitlePosition()
-                        } else {
-                            secondarySubtitleHorizontalOffsetDp = pxToDp(params.x)
-                            secondarySubtitleBottomMarginDp = pxToDp(params.y)
-                            saveSecondarySubtitleState()
-                        }
-                    } else if (!scaled && studyModeEnabled && slot == 1) {
-                        view.performClick()
-                    }
+                MotionEvent.ACTION_POINTER_UP -> {
+                    // Once a multi-touch gesture begins, this gesture can never become a Study-mode tap.
+                    scaleLocked = true
+                    tapCandidate = false
                     true
                 }
 
-                MotionEvent.ACTION_CANCEL -> true
+                MotionEvent.ACTION_UP -> {
+                    when {
+                        scaleLocked -> Unit
+                        dragLocked -> {
+                            if (slot == 1) {
+                                subtitleHorizontalOffsetDp = pxToDp(params.x)
+                                subtitleBottomMarginDp = pxToDp(params.y)
+                                saveSubtitlePosition()
+                            } else {
+                                secondarySubtitleHorizontalOffsetDp = pxToDp(params.x)
+                                secondarySubtitleBottomMarginDp = pxToDp(params.y)
+                                saveSecondarySubtitleState()
+                            }
+                        }
+                        tapCandidate -> view.performClick()
+                    }
+                    tapCandidate = false
+                    true
+                }
+
+                MotionEvent.ACTION_CANCEL -> {
+                    tapCandidate = false
+                    true
+                }
+
                 else -> true
             }
         }
