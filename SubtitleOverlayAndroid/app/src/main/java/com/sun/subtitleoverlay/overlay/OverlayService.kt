@@ -308,7 +308,6 @@ class OverlayService : Service() {
             description = "Change playback speed",
         ) { cyclePlaybackSpeed() }
         playbackControls.addView(speedView)
-        panel.addView(collapsibleSection("Playback", playbackControls))
 
         val subtitleControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -329,7 +328,6 @@ class OverlayService : Service() {
         subtitleControls.addView(chip("A", textSizeSp = 18f, description = "Larger subtitles") {
             changeSubtitleTextSize(TEXT_SIZE_STEP_SP)
         })
-        panel.addView(collapsibleSection("Subtitle timing & size", subtitleControls))
 
         val positionControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -345,7 +343,6 @@ class OverlayService : Service() {
         positionControls.addView(chip("↺", textSizeSp = 17f, description = "Reset subtitle position") {
             resetSubtitlePosition()
         })
-        panel.addView(collapsibleSection("Subtitle position", positionControls))
 
         val studyControls = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -396,14 +393,50 @@ class OverlayService : Service() {
             setPadding(dp(5), dp(5), dp(5), 0)
         }
         studyControls.addView(studyStatusView)
-        panel.addView(
-            collapsibleSection(
-                title = "Study mode",
-                content = studyControls,
-                initiallyExpanded = studyModeEnabled,
-                onExpandedChanged = ::setStudyMode,
-            )
-        )
+        val subtitlePage = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            addView(subtitleControls)
+            addView(positionControls)
+        }
+        val tabRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, dp(6), 0, 0)
+        }
+        val tabContent = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+        }
+        lateinit var playbackTab: TextView
+        lateinit var subtitleTab: TextView
+        lateinit var studyTab: TextView
+        fun showTab(tab: String) {
+            playbackControls.visibility = if (tab == "playback") View.VISIBLE else View.GONE
+            subtitlePage.visibility = if (tab == "subtitle") View.VISIBLE else View.GONE
+            studyControls.visibility = if (tab == "study") View.VISIBLE else View.GONE
+            playbackTab.background = tabBackground(tab == "playback")
+            subtitleTab.background = tabBackground(tab == "subtitle")
+            studyTab.background = tabBackground(tab == "study")
+            playbackTab.setTextColor(if (tab == "playback") Color.WHITE else COLOR_MUTED_TEXT)
+            subtitleTab.setTextColor(if (tab == "subtitle") Color.WHITE else COLOR_MUTED_TEXT)
+            studyTab.setTextColor(if (tab == "study") Color.WHITE else COLOR_MUTED_TEXT)
+            setStudyMode(tab == "study")
+            tabContent.requestLayout()
+            controllerView?.requestLayout()
+        }
+        playbackTab = tabButton("Playback") { showTab("playback") }
+        subtitleTab = tabButton("Subtitle") { showTab("subtitle") }
+        studyTab = tabButton("Study") { showTab("study") }
+        tabRow.addView(playbackTab)
+        tabRow.addView(subtitleTab)
+        tabRow.addView(studyTab)
+        panel.addView(tabRow)
+        tabContent.addView(playbackControls)
+        tabContent.addView(subtitlePage)
+        tabContent.addView(studyControls)
+        panel.addView(tabContent)
+        showTab(if (studyModeEnabled) "study" else "playback")
 
         makeDraggable(panel)
         return panel
@@ -457,6 +490,31 @@ class OverlayService : Service() {
         section.addView(content)
         return section
     }
+
+    private fun tabButton(label: String, action: () -> Unit) = TextView(this).apply {
+        text = label
+        textSize = 11f
+        typeface = Typeface.DEFAULT_BOLD
+        gravity = Gravity.CENTER
+        minWidth = dp(76)
+        minHeight = dp(32)
+        setPadding(dp(10), 0, dp(10), 0)
+        setTextColor(COLOR_MUTED_TEXT)
+        background = tabBackground(false)
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { action() }
+        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            marginStart = dp(2)
+            marginEnd = dp(2)
+        }
+    }
+
+    private fun tabBackground(selected: Boolean) = roundedBackground(
+        if (selected) Color.argb(255, 105, 80, 164) else Color.argb(210, 42, 41, 48),
+        dp(9),
+        if (selected) 0xFF9B7FD1.toInt() else COLOR_BUTTON_BORDER,
+    )
 
     private fun chip(
         label: String,
