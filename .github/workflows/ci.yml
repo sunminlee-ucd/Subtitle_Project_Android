@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - master
+      - agent/study-gesture-separation
     paths-ignore:
       - 'APK/**'
 
@@ -21,9 +22,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
 
       - name: Apply strict Study gesture patch
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         working-directory: .
         run: |
           if grep -q 'tapCandidate = studyModeEnabled && slot == 1' SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/overlay/OverlayService.kt; then
@@ -72,8 +74,8 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish source and APK
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+      - name: Publish source and APK to branch
+        if: github.event_name == 'push'
         working-directory: .
         run: |
           mkdir -p APK
@@ -87,4 +89,4 @@ jobs:
             exit 0
           fi
           git commit -m "Separate Study tap from subtitle gestures"
-          git push origin HEAD:master
+          git push origin HEAD:${GITHUB_REF_NAME}
