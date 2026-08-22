@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - master
+      - agent/tabbed-overlay-controller
     paths-ignore:
       - 'APK/**'
 
@@ -21,9 +22,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
 
       - name: Apply controller tabs
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         working-directory: .
         run: |
           if grep -q 'playbackTab = tabButton("Playback")' SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/overlay/OverlayService.kt; then
@@ -72,8 +74,8 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish source and APK
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+      - name: Publish implementation to branch
+        if: github.event_name == 'push'
         working-directory: .
         run: |
           mkdir -p APK
@@ -83,8 +85,8 @@ jobs:
           git add SubtitleOverlayAndroid/app/src/main/java/com/sun/subtitleoverlay/overlay/OverlayService.kt
           git add -f APK/subtitle-companion.apk
           if git diff --cached --quiet; then
-            echo "Source and APK are already up to date."
+            echo "Implementation and APK are already up to date."
             exit 0
           fi
           git commit -m "Use tabbed overlay controller"
-          git push origin HEAD:master
+          git push origin HEAD:${GITHUB_REF_NAME}
